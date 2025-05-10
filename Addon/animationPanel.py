@@ -1,0 +1,581 @@
+# #################### #
+# Animation Panel
+# #################### #
+
+
+import bpy
+import os
+import mathutils
+import shutil
+import struct
+import xml.etree.ElementTree as ET
+
+
+# Xml
+def parse_nodes_from_xml(filepath):
+    if not filepath or not os.path.exists(filepath):
+        return []
+    
+    tree = ET.parse(filepath)
+    root = tree.getroot()
+
+    nodes = []
+    nodes_section = root.find("Nodes")
+    if nodes_section is not None:
+        for node in nodes_section:
+            nodes.append(node.tag)  # Node name is the tag
+
+    return nodes
+
+def get_node_order_from_xml(dependencies_xml, model_xml):
+    node_order = []
+    seen_nodes = set()  # To track duplicate names
+
+    def extract_nodes(xml_path):
+        if not xml_path:
+            return  # Skip if no file is provided
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            nodes_section = root.find("Nodes")
+            if nodes_section is not None:
+                for node in nodes_section:
+                    node_name = node.tag  # Node name is the tag
+                    if node_name in seen_nodes:
+                        raise ValueError(f"Duplicate node found in both XMLs: {node_name}")
+                    seen_nodes.add(node_name)
+                    node_order.append(node_name)
+        except ET.ParseError as e:
+            raise ValueError(f"Failed to parse XML file: {xml_path}\nError: {str(e)}")
+
+    extract_nodes(dependencies_xml)
+    extract_nodes(model_xml)
+
+    if not node_order:
+        raise ValueError("No valid nodes found in the provided XML files.")
+
+    return node_order
+
+
+# Decompile .bin Animation into a temporary .bindec
+def decompile_bin(filepath):
+    bindec_path = filepath.replace(".bin", ".bindec")
+
+    with open(filepath, "rb") as file:
+        block_count = struct.unpack("i", file.read(4))[0]
+        
+        lines = [f"Binary blocks count: {block_count}"]
+
+        for _ in range(block_count):
+            file.read(1)  # Skip a byte
+            set_count = struct.unpack("i", file.read(4))[0]
+            frame_data = [f"[{set_count}]"]
+
+            for _ in range(set_count):
+                x, y, z = struct.unpack("fff", file.read(12))
+                frame_data.append(f"{{{x},{y},{z}}}")
+
+            lines.append("".join(frame_data) + "END")
+
+    with open(bindec_path, "w") as output_file:
+        output_file.write("\n".join(lines))
+
+    return bindec_path
+
+# Compile animation into .bin file
+def compile_bin(filepath):
+    bin_path = filepath.replace(".bindec", ".bin")
+
+    with open(filepath, "r") as file:
+        lines = file.readlines()
+
+    if not lines[0].startswith("Binary blocks count:"):
+        return
+
+    block_count = int(lines[0].split(":")[1].strip())
+
+    with open(bin_path, "wb") as file:
+        file.write(struct.pack("i", block_count))  # Write block count
+
+        for line in lines[1:]:
+            line = line.strip()
+            if line == "END":  # Ignore standalone "END" lines
+                continue
+            if not line.startswith("[") or "{" not in line:
+                continue
+
+            try:
+                # Extract set count inside "[...]"
+                set_count = int(line[line.index("[")+1:line.index("]")])
+
+                # Extract positions
+                positions_str = line[line.index("{") + 1:line.rindex("}")].split("}{")
+                positions = [list(map(float, p.split(","))) for p in positions_str]
+
+                file.write(struct.pack("B", 0))  # Write byte 0
+                file.write(struct.pack("i", set_count))  # Write number of positions
+
+                for pos in positions:
+                    file.write(struct.pack("fff", pos[0], pos[1], pos[2]))  
+
+            except ValueError:
+                print(f"Error processing line: {line}")
+
+    
+    # Remove the .bindec file after compilation
+    try:
+        os.remove(filepath)
+    except OSError as e:
+        print(f"Error deleting {filepath}: {e}")
+
+
+# Export Node Point positions to .bindec file
+def export_bindec(filepath, dependencies_xml, model_xml):
+    
+    # Get the node order from XMLs
+    nodepoint_order = get_node_order_from_xml(dependencies_xml, model_xml)
+    limit = len(nodepoint_order)  # Set limit based on detected nodes
+
+    scene = bpy.context.scene
+    start_frame = scene.frame_start
+    end_frame = scene.frame_end
+
+    lines = []
+
+    for frame in range(start_frame, end_frame + 1):
+        scene.frame_set(frame)
+        positions = []
+
+        for name in nodepoint_order:
+            obj = bpy.data.objects.get(name)
+            if obj:
+                pos = obj.matrix_world.translation
+                x = pos.x
+                z = -pos.y  # Flip the Z-axis
+                y = pos.z 
+                positions.append(f"{x:.8f},{y:.8f},{z:.8f}")
+            else:
+                positions.append("0,0,0")
+
+        line = f"[{limit}]{{{'}{'.join(positions)}}}END"
+        lines.append(line)
+
+    with open(filepath, 'w') as file:
+        file.write(f"Binary blocks count: {len(lines)}\n")
+        for line in lines:
+            file.write(f"{line}\n")
+
+# Import .bindec file
+def import_bindec(filepath, dependencies_xml="", model_xml=""):
+    settings = bpy.context.scene.gymnast_tool_props
+    use_spline = settings.use_spline
+    pivot_node_name = settings.pivot_node
+    start_frame = settings.start_frame
+    
+    # Generate node order from XML files
+    node_order = parse_nodes_from_xml(dependencies_xml)
+    model_nodes = parse_nodes_from_xml(model_xml)
+    
+    # Check for duplicate nodes
+    duplicate_nodes = set(node_order) & set(model_nodes)
+    if duplicate_nodes:
+       raise ValueError(f"Duplicate nodes found in both XML files: {', '.join(duplicate_nodes)}")
+
+    node_order.extend(model_nodes)  # Merge both lists
+    if not node_order:
+        raise ValueError("At least one XML file must contain nodes.")
+
+    limit = len(node_order)  # Use node count as limit
+    
+    with open(filepath, 'r') as file:
+        lines = file.readlines()
+    
+    if not lines or not lines[0].startswith("Binary blocks count:"):
+        return {'CANCELLED'}
+    
+    binary_blocks_count = int(lines[0].split(":")[1].strip())
+    
+    scene = bpy.context.scene
+    pivot_node_obj = bpy.data.objects.get(pivot_node_name) if use_spline else None
+    
+    # Determine the last known position of the pivot node
+    if use_spline and pivot_node_obj:
+        if pivot_node_obj.animation_data and pivot_node_obj.animation_data.action:
+            fcurves = pivot_node_obj.animation_data.action.fcurves
+            location_curves = [curve for curve in fcurves if curve.data_path == "location"]
+            keyframes = [kp.co.x for curve in location_curves for kp in curve.keyframe_points]
+            last_pivot_frame = max(keyframes, default=scene.frame_start)
+        else:
+            last_pivot_frame = scene.frame_start
+            
+        if not settings.stay_in_place:
+            last_pivot_pos = pivot_node_obj.matrix_world.translation.copy()
+        new_start_frame = int(last_pivot_frame) + 1
+    else:
+        if not settings.stay_in_place:
+            last_pivot_pos = None
+        new_start_frame = scene.frame_start
+    
+    frame_index = start_frame  # Adjusting based on the specified Start Frame
+    if not settings.stay_in_place:
+        pivot_offset = (0, 0, 0)
+    
+    for frame in range(new_start_frame, new_start_frame + (binary_blocks_count - start_frame)):
+        if frame_index >= len(lines):
+            break
+        
+        line = lines[frame_index].strip()
+        frame_index += 1
+        
+        if line.startswith("[") and line.endswith("END"):
+            try:
+                positions_str = line[line.index("{") + 1:line.rindex("}")].split("}{")
+                positions = [p.split(",") for p in positions_str[:limit]]
+                positions += [["0", "0", "0"]] * (limit - len(positions))
+                
+                if use_spline and pivot_node_obj:
+                    pivot_index = node_order.index(pivot_node_name) if pivot_node_name in node_order else None
+                    if settings.stay_in_place:
+                        if pivot_index is not None:
+                            pivot_last_pos = pivot_node_obj.matrix_world.translation
+                            pivot_new_pos = (float(positions[pivot_index][0]), -float(positions[pivot_index][2]), float(positions[pivot_index][1]))
+                            offset = (pivot_last_pos[0] - pivot_new_pos[0], pivot_last_pos[1] - pivot_new_pos[1], pivot_last_pos[2] - pivot_new_pos[2])
+                        else:
+                            offset = (0, 0, 0)
+                    else:
+                        pivot_new_pos = (
+                            float(positions[pivot_index][0]),
+                            -float(positions[pivot_index][2]),
+                            float(positions[pivot_index][1])
+                        )
+                        
+                        # Compute offset only at the first frame
+                        if last_pivot_pos and frame == new_start_frame:
+                            pivot_offset = (
+                                last_pivot_pos[0] - pivot_new_pos[0],
+                                last_pivot_pos[1] - pivot_new_pos[1],
+                                last_pivot_pos[2] - pivot_new_pos[2]
+                            )
+                
+                for i, name in enumerate(node_order[:limit]):
+                    obj = bpy.data.objects.get(name)
+                    if obj:
+                        if settings.stay_in_place:
+                            x = float(positions[i][0]) + offset[0]
+                            z = float(positions[i][1]) + offset[2]
+                            y = -float(positions[i][2]) + offset[1]
+                        else:
+                            x = float(positions[i][0]) + pivot_offset[0]
+                            z = float(positions[i][1]) + pivot_offset[2]
+                            y = -float(positions[i][2]) + pivot_offset[1]
+                        
+                        obj.location = (x, y, z)
+                        obj.keyframe_insert(data_path="location", frame=frame)
+                        
+            except ValueError:
+                continue
+    
+    scene.frame_end = new_start_frame + (binary_blocks_count - start_frame)
+    scene.frame_set(new_start_frame)
+    return {'FINISHED'}
+
+
+
+# #################### #
+# Operator
+# #################### #
+
+
+# Operator to export node point positions
+class ExportBindecOperator(bpy.types.Operator):
+    bl_idname = "export.bindec"
+    bl_label = "Export Animation"
+    bl_description = "Export the positions of node points in every frames to a .bin"
+
+    filepath: bpy.props.StringProperty(
+        name="File Path",
+        description="Filepath used for exporting the .bin file",
+        subtype="FILE_PATH"
+    )
+
+    def execute(self, context):
+        settings = context.scene.gymnast_tool_props
+        dependencies_xml = None
+        model_xml = None
+        dependencies_xml_unconvert = settings.dependencies_xml
+        model_xml_unconvert = settings.model_xml
+        
+        if dependencies_xml_unconvert:
+            dependencies_xml = bpy.path.abspath(dependencies_xml_unconvert)
+            
+        if model_xml_unconvert:
+            model_xml = bpy.path.abspath(model_xml_unconvert)
+    
+        if not self.filepath.endswith(".bin"):
+            self.filepath += ".bin"
+        
+        bindec_path = self.filepath.replace(".bin", ".bindec")
+        
+        try:
+            export_bindec(bindec_path, dependencies_xml, model_xml)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        
+        if not context.scene.gymnast_tool_props.export_as_bindec:
+            compile_bin(bindec_path)  # Compile to .bin and remove .bindec
+        
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        scene_name = bpy.path.basename(context.blend_data.filepath)
+        scene_name = os.path.splitext(scene_name)[0]
+        self.filepath = bpy.path.abspath("//") + scene_name + ".bin"
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+    
+# Operator to import node point positions
+class ImportBindecOperator(bpy.types.Operator):
+    bl_idname = "import.bindec"
+    bl_label = "Import Animation"
+    bl_description = "Import positions of node points from a .bin"
+
+    filepath: bpy.props.StringProperty(
+        name="File Path",
+        description="Filepath used for importing the .bin file",
+        subtype="FILE_PATH"
+    )
+
+    def execute(self, context):
+        settings = context.scene.gymnast_tool_props  # Access global properties
+        dependencies_xml = None
+        model_xml = None
+        dependencies_xml_unconvert = settings.dependencies_xml
+        model_xml_unconvert = settings.model_xml
+        
+        if dependencies_xml_unconvert:
+            dependencies_xml = bpy.path.abspath(dependencies_xml_unconvert)
+            
+        if model_xml_unconvert:
+            model_xml = bpy.path.abspath(model_xml_unconvert)
+        
+        if self.filepath.endswith(".bin"):
+            bindec_path = decompile_bin(self.filepath)
+        else:
+            bindec_path = self.filepath
+            
+        try:
+            import_bindec(bindec_path, dependencies_xml, model_xml)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        
+        # Remove temporary .bindec
+        if self.filepath.endswith(".bin"):
+            os.remove(bindec_path)
+            
+        return {'FINISHED'}
+
+
+    def invoke(self, context, event):
+        # Set the default file path
+        self.filepath = bpy.path.abspath("//")  # Start with current blend file directory
+        wm = context.window_manager
+        wm.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+# Settings
+class GymnastToolSettings(bpy.types.PropertyGroup):
+    dependencies_xml: bpy.props.StringProperty(
+        name="Dependencies XML",
+        description="Path to the Dependencies XML file",
+        subtype="FILE_PATH"
+    )
+    model_xml: bpy.props.StringProperty(
+        name="Model XML",
+        description="Path to the Model XML file",
+        subtype="FILE_PATH"
+    )
+    export_as_bindec: bpy.props.BoolProperty(
+        name="Export as Bindec", 
+        description="Export only as .bindec without compiling to .bin\nDefault: False", 
+        default=False
+    )
+    use_spline: bpy.props.BoolProperty(
+        name="Use Spline",
+        description="Align new animation based on pivot node's last position\nDefault: False",
+        default=False
+    )
+    stay_in_place: bpy.props.BoolProperty(
+        name="Stay in Place",
+        description="Align new animation based on pivot node as an anchor point.\nDefault: False",
+        default=False
+    )
+    pivot_node: bpy.props.StringProperty(
+        name="Pivot Node",
+        description="Name of the pivot node used for alignment",
+        default=""
+    )
+    start_frame: bpy.props.IntProperty(
+        name="Start Frame",
+        description="Starting frame for imported animation",
+        default=1,
+        min=1
+    )
+
+
+class CompileBinOperator(bpy.types.Operator):
+    bl_idname = "file.compile_bindec"
+    bl_label = "Compile to .bin"
+    bl_description = "Select a .bindec file to compile into .bin"
+    
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    
+    def execute(self, context):
+        if not self.filepath.endswith(".bindec"):
+            self.report({'ERROR'}, "Please select a .bindec file")
+            return {'CANCELLED'}
+        
+        compile_bin(self.filepath)
+        return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+class DecompileBinOperator(bpy.types.Operator):
+    bl_idname = "file.decompile_bin"
+    bl_label = "Decompile to .bindec"
+    bl_description = "Select a .bin file to decompile into .bindec"
+    
+    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    
+    def execute(self, context):
+        if not self.filepath.endswith(".bin"):
+            self.report({'ERROR'}, "Please select a .bin file")
+            return {'CANCELLED'}
+        
+        decompile_bin(self.filepath)
+        return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+
+# #################### #
+# Sideview Panel Menu  #
+# #################### #
+
+
+class VIEW3D_PT_gymnast_animation_panel(bpy.types.Panel):
+    bl_label = "Animation Tools"
+    bl_idname = "VIEW3D_PT_gymnast_animation_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Gymnast Tool Suite'
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.gymnast_tool_props
+
+        layout.prop(settings, "dependencies_xml")
+        layout.prop(settings, "model_xml")
+        
+        # Actual bits n bop
+        box = layout.box()
+        box.label(text="Animation Options", icon='ARMATURE_DATA')
+        box.operator(ImportBindecOperator.bl_idname, text="Import Animation")
+        box.operator(ExportBindecOperator.bl_idname, text="Export Animation")
+        
+class VIEW3D_PT_gymnast_animation_settings(bpy.types.Panel):
+    bl_label = "Settings"
+    bl_idname = "VIEW3D_PT_gymnast_animation_settings"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Gymnast Tool Suite'
+    bl_parent_id = "VIEW3D_PT_gymnast_animation_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+    
+    def draw(self, context):
+        layout = self.layout
+
+class VIEW3D_PT_gymnast_animation_settings_export(bpy.types.Panel):
+    bl_label = "Export Settings"
+    bl_idname = "VIEW3D_PT_gymnast_animation_settings_export"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Gymnast Tool Suite'
+    bl_parent_id = "VIEW3D_PT_gymnast_animation_settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Export Settings")
+        box.prop(context.scene.gymnast_tool_props, "export_as_bindec")
+
+class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
+    bl_label = "Import Settings"
+    bl_idname = "VIEW3D_PT_gymnast_animation_settings_import"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Gymnast Tool Suite'
+    bl_parent_id = "VIEW3D_PT_gymnast_animation_settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        props = context.scene.gymnast_tool_props
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Splining")
+        box.prop(context.scene.gymnast_tool_props, "use_spline")
+        if props.use_spline:
+            box.prop(context.scene.gymnast_tool_props, "stay_in_place")
+        box.prop(context.scene.gymnast_tool_props, "pivot_node")
+        box.prop(context.scene.gymnast_tool_props, "start_frame")
+
+class VIEW3D_PT_gymnast_animation_settings_miscellaneous(bpy.types.Panel):
+    bl_label = "Miscellaneous"
+    bl_idname = "VIEW3D_PT_gymnast_animation_settings_miscellaneous"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Gymnast Tool Suite'
+    bl_parent_id = "VIEW3D_PT_gymnast_animation_settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        box = layout.box()
+        box.label(text="Options")
+        box.operator("file.compile_bindec", text="Compile .Bindec")
+        box.operator("file.decompile_bin", text="Decompile .Bin")
+
+
+#register
+classes = [
+    ImportBindecOperator,
+    ExportBindecOperator,
+    CompileBinOperator,
+    DecompileBinOperator,
+    GymnastToolSettings,
+    VIEW3D_PT_gymnast_animation_panel,
+    VIEW3D_PT_gymnast_animation_settings,
+    VIEW3D_PT_gymnast_animation_settings_export,
+    VIEW3D_PT_gymnast_animation_settings_import,
+    VIEW3D_PT_gymnast_animation_settings_miscellaneous,
+]
+
+def register():
+    for cls in classes:
+        bpy.utils.register_class(cls)
+    bpy.types.Scene.gymnast_tool_props = bpy.props.PointerProperty(type=GymnastToolSettings)
+
+def unregister():
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)
+    del bpy.types.Scene.gymnast_tool_props
+
+if __name__ == "__main__":
+    register()
