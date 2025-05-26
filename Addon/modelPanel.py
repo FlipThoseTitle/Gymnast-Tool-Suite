@@ -3070,6 +3070,7 @@ class SetOrientation(bpy.types.Operator):
         model_body_top = settings.model_body_top
         model_body_middle = settings.model_body_middle
         model_body_bottom = settings.model_body_bottom
+        flipped = settings.model_align_flipped
         
             
         def add_constraint():
@@ -3190,7 +3191,7 @@ class SetOrientation(bpy.types.Operator):
                         # Add Damped Track (Y Axis)
                         damped_x = selected_object.constraints.new(type='DAMPED_TRACK')
                         damped_x.target = object_nheads_2
-                        damped_x.track_axis = 'TRACK_X'
+                        damped_x.track_axis = 'TRACK_X' if not flipped else 'TRACK_NEGATIVE_X'
                     
                     elif model_type == 'RANGED':
                         object_ranged2 = bpy.data.objects.get("Ranged-Node2_1") # origin
@@ -4250,6 +4251,9 @@ class SetOrientation(bpy.types.Operator):
 
                 # Damped Track Constraints
                 for axis, key in zip(['TRACK_Z', 'TRACK_Y', 'TRACK_X'], ['track_1', 'track_2', 'track_3']):
+                    if flipped and axis == 'TRACK_X':
+                        axis = 'TRACK_NEGATIVE_X'
+                        
                     target_name = profile[key]
                     target_obj = bpy.data.objects.get(target_name)
                     if target_obj:
@@ -4680,6 +4684,11 @@ class GymnastToolModelSettings(bpy.types.PropertyGroup):
         description="Add a Cloth Vertex Group during the conversion.\nDefault: True", 
         default=True
     )
+    model_align_flipped: bpy.props.BoolProperty(
+        name="Flipped",
+        description="Whether or not the damped track should be flipped.\nNormally, Vector and SF2 rig has swapped side, 1 will be swapped with 2 (Ex. NAnkle_1 --> NAnkle_2)\nVector = True, SF2 = False\nDefault: False",
+        default=False
+    )
     
 class MacroRuleItem(bpy.types.PropertyGroup):
     group: bpy.props.StringProperty(name="Group", description="Name of the Vertex Group.")
@@ -4904,6 +4913,7 @@ class VIEW3D_PT_gymnast_settings_object_settings(bpy.types.Panel):
                 box.label(text="Head Gear Alignment")
                 box.prop(context.scene.gymnast_tool_model_props, "selected_object")
                 box.prop(context.scene.gymnast_tool_model_props, "model_use_existing_object")
+                box.prop(context.scene.gymnast_tool_model_props, "model_align_flipped")
                 box.operator(SetOrientation.bl_idname, text="Set Alignment")
             elif props.model_type_export == 'BODY_GEAR':
                 box = layout.box()
@@ -4911,7 +4921,8 @@ class VIEW3D_PT_gymnast_settings_object_settings(bpy.types.Panel):
                 box.prop(context.scene.gymnast_tool_model_props, "selected_object")
                 box.prop(context.scene.gymnast_tool_model_props, "model_body_top")
                 box.prop(context.scene.gymnast_tool_model_props, "model_body_middle")
-                box.prop(context.scene.gymnast_tool_model_props, "model_body_bottom")   
+                box.prop(context.scene.gymnast_tool_model_props, "model_body_bottom")
+                box.prop(context.scene.gymnast_tool_model_props, "model_align_flipped")                
                 box.operator(SetOrientation.bl_idname, text="Set Alignment")
             elif props.model_type_export == 'MODEL':
                 box = layout.box()
