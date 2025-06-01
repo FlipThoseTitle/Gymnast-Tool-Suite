@@ -10,6 +10,53 @@ import shutil
 import struct
 import xml.etree.ElementTree as ET
 
+# Node to Bone
+NODE_TO_BONE = {
+    "NTop": "Head",
+    "NHead": "Head",
+    "NHeadF": "HeadF",
+    "NHeadS_2": "HeadF",
+    "NHeadS_1": "HeadF",
+    "NNeck": "Neck",
+    "NShoulder_2": "Clavicle_2",
+    "NShoulder_1": "Clavicle_1",
+    "NElbow_2": "Arm_2",
+    "NElbow_1": "Arm_1",
+    "NWrist_2": "Forearm_2",
+    "NWrist_1": "Forearm_1",
+    "NKnuckles_2": "Hand_2",
+    "NKnuckles_1": "Hand_1",
+    "NKnucklesS_2": "Hand_2",
+    "NKnucklesS_1": "Hand_1",
+    "NFingertips_2": "Fingers_2",
+    "NFingertips_1": "Fingers_1",
+    "NChest": "Chest",
+    "NChestF": "Chest",
+    "NChestS_2": "Chest",
+    "NChestS_1": "Chest",
+    "NStomach": "Stomach",
+    "NStomachF": "Stomach",
+    "NStomachS_2": "Stomach",
+    "NStomachS_1": "Stomach",
+    "NPivot": "Pelvis",
+    "NPelvisF": "Pelvis",
+    "NHip_2": "Hip_2",
+    "NHip_1": "Hip_1",
+    "NKnee_2": "Thigh_2",
+    "NKnee_1": "Thigh_1",
+    "NAnkle_2": "Calf_2",
+    "NAnkle_1": "Calf_1",
+    "NHeel_2": "Heel_2",
+    "NHeel_1": "Heel_1",
+    "NToe_2": "Foot_2",
+    "NToe_1": "Foot_1",
+    "NToeS_2": "Foot_2",
+    "NToeS_1": "Foot_1",
+    "NToeTip_2": "Toes_2",
+    "NToeTip_1": "Toes_1",
+    "COM": "COM"
+}
+
 
 # Xml
 def parse_nodes_from_xml(filepath):
@@ -129,6 +176,216 @@ def compile_bin(filepath):
         print(f"Error deleting {filepath}: {e}")
 
 
+# Set-up Armature to follow Node Point
+def setup_armature_follow_node(dependencies_xml="", model_xml=""):
+    settings = bpy.context.scene.gymnast_tool_props
+    armature = settings.armature_object
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='POSE')
+    fbone = False
+    
+    # Generate node order from XML files
+    node_order = parse_nodes_from_xml(dependencies_xml)
+    model_nodes = parse_nodes_from_xml(model_xml)
+    
+    # Check for duplicate nodes
+    duplicate_nodes = set(node_order) & set(model_nodes)
+    if duplicate_nodes:
+       raise ValueError(f"Duplicate nodes found in both XML files: {', '.join(duplicate_nodes)}")
+
+    node_order.extend(model_nodes)  # Merge both lists
+    if not node_order:
+        raise ValueError("At least one XML file must contain nodes.")
+
+    limit = len(node_order)  # Use node count as limit
+    
+    for i, name in enumerate(node_order[:limit]):
+        node = bpy.data.objects.get(name)
+        if node:
+            for constraint in node.constraints:
+                if constraint.type == 'CHILD_OF':
+                    node.constraints.remove(constraint)
+                    
+        node_name = name
+        
+        if node_name == "NWrist_1":
+            bone = armature.pose.bones.get("HandIK_1")
+            constraint = bone.constraints.new(type='COPY_LOCATION')
+            constraint.target = node
+        if node_name == "NWrist_2":
+            bone = armature.pose.bones.get("HandIK_2")
+            constraint = bone.constraints.new(type='COPY_LOCATION')
+            constraint.target = node
+        
+        if node_name == "NAnkle_1":
+            bone = armature.pose.bones.get("HeelIK_1")
+            constraint = bone.constraints.new(type='COPY_LOCATION')
+            constraint.target = node
+        if node_name == "NAnkle_2":
+            bone = armature.pose.bones.get("HeelIK_2")
+            constraint = bone.constraints.new(type='COPY_LOCATION')
+            constraint.target = node
+        
+        if node_name == "COM":
+            bone = armature.pose.bones.get("COM")
+            constraint = bone.constraints.new(type='COPY_LOCATION')
+            constraint.target = node
+
+        if node_name == "NToeS_1":
+            bone = armature.pose.bones.get("Foot_1")
+            constraint = bone.constraints.new(type='LOCKED_TRACK')
+            constraint.target = node
+            constraint.track_axis = 'TRACK_Z'
+            constraint.lock_axis = 'LOCK_Y'
+        elif node_name == "NToeS_2":
+            bone = armature.pose.bones.get("Foot_2")
+            constraint = bone.constraints.new(type='LOCKED_TRACK')
+            constraint.target = node
+            constraint.track_axis = 'TRACK_Z'
+            constraint.lock_axis = 'LOCK_Y'
+            
+        if node_name == "NHeadS_2":
+            bone = armature.pose.bones.get("Head")
+            constraint = bone.constraints.new(type='LOCKED_TRACK')
+            constraint.target = node
+            constraint.track_axis = 'TRACK_Z'
+            constraint.lock_axis = 'LOCK_Y'
+        
+        if node_name == "NKnucklesS_1":
+            bone = armature.pose.bones.get("Hand_1")
+            constraint = bone.constraints.new(type='LOCKED_TRACK')
+            constraint.target = node
+            constraint.track_axis = 'TRACK_Z'
+            constraint.lock_axis = 'LOCK_Y'
+        elif node_name == "NKnucklesS_2":
+            bone = armature.pose.bones.get("Hand_2")
+            constraint = bone.constraints.new(type='LOCKED_TRACK')
+            constraint.target = node
+            constraint.track_axis = 'TRACK_Z'
+            constraint.lock_axis = 'LOCK_Y'
+        
+        if node_name.endswith("S_1") or node_name.endswith("S_2") or node_name == "NTop" or node_name == "Camera" or node_name == "DetectorH" or node_name == "DetectorV":
+            continue
+        
+        if node_name == "NHeadF":
+            bone = armature.pose.bones.get("HeadF")
+            constraint = bone.constraints.new(type='DAMPED_TRACK')
+            constraint.target = bpy.data.objects.get(node_name)
+            continue
+            
+        if node_name.endswith("F"):
+            fbone = True
+        else:
+            fbone = False
+        
+        bone_id = NODE_TO_BONE.get(node_name)
+        print(node_name)
+        bone = armature.pose.bones.get(bone_id)
+        if bone:
+            if fbone:
+                constraint = bone.constraints.new(type='LOCKED_TRACK')
+                constraint.target = node
+                constraint.track_axis = 'TRACK_Z'
+                constraint.lock_axis = 'LOCK_Y'
+                    
+                continue
+            
+            if bone_id == "Pelvis" or bone_id == "Hip_1" or bone_id == "Hip_2" and fbone is not True:         
+                constraint2 = bone.constraints.new(type='COPY_LOCATION')
+                constraint2.target = bpy.data.objects.get("NPivot")
+                
+            constraint = bone.constraints.new(type='DAMPED_TRACK')
+            
+            if bone_id == "Pelvis":
+                constraint.target = bpy.data.objects.get("NStomach")
+            elif bone_id == "Stomach":
+                constraint.target = bpy.data.objects.get("NChest")
+            elif bone_id == "Chest":
+                constraint.target = bpy.data.objects.get("NNeck")
+            elif bone_id == "Neck":
+                constraint.target = bpy.data.objects.get("NHead")
+            elif bone_id == "Head":
+                constraint.target = bpy.data.objects.get("NTop")
+            else:
+                constraint.target = node
+                
+    #Fix NPivot LockedTrack constraint
+    pivotbone = armature.pose.bones.get("Pelvis")
+    index = pivotbone.constraints.find("Locked Track")
+    last_index = len(pivotbone.constraints) - 1
+    
+    while index < last_index:
+        pivotbone.constraints.move(index, index + 1)
+        index += 1
+
+# Armature Baking
+def armature_bake(dependencies_xml="", model_xml=""):
+    settings = bpy.context.scene.gymnast_tool_props
+    scene = bpy.context.scene
+    armature = settings.armature_object
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='POSE')
+    
+    # Generate node order from XML files
+    node_order = parse_nodes_from_xml(dependencies_xml)
+    model_nodes = parse_nodes_from_xml(model_xml)
+    
+    # Check for duplicate nodes
+    duplicate_nodes = set(node_order) & set(model_nodes)
+    if duplicate_nodes:
+       raise ValueError(f"Duplicate nodes found in both XML files: {', '.join(duplicate_nodes)}")
+
+    node_order.extend(model_nodes)  # Merge both lists
+    if not node_order:
+        raise ValueError("At least one XML file must contain nodes.")
+
+    limit = len(node_order)  # Use node count as limit
+    
+    # Bake animation
+    bpy.ops.nla.bake(
+        frame_start=scene.frame_start,
+        frame_end=scene.frame_end,
+        only_selected=False,
+        visual_keying=True,
+        clear_constraints=True,
+        bake_types={'POSE'}
+    )
+    
+    for frame in range(scene.frame_start, scene.frame_end):
+        for i, name in enumerate(node_order[:limit]):
+            if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
+                continue
+            node = bpy.data.objects.get(name)
+            node.keyframe_delete(data_path="location", frame=frame)
+            
+    for i, name in enumerate(node_order[:limit]):
+        if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
+            continue
+            
+        node = bpy.data.objects.get(name)
+        constraint = node.constraints.new(type='CHILD_OF')
+        constraint.target = armature
+        
+        bone_id = NODE_TO_BONE.get(name)
+        constraint.subtarget = bone_id
+        
+    IK_BONES = ["Calf_1", "Calf_2", "Forearm_1", "Forearm_2"]
+    for i, name in enumerate(IK_BONES[:4]):
+        bone = armature.pose.bones.get(name)
+        constraint = bone.constraints.new(type='IK')
+        constraint.chain_count = 2
+        constraint.target = armature
+        
+        if name == "Calf_1":
+            constraint.subtarget = "HeelIK_1"
+        if name == "Calf_2":
+            constraint.subtarget = "HeelIK_2"
+        if name == "Forearm_1":
+            constraint.subtarget = "HandIK_1"
+        if name == "Forearm_2":
+            constraint.subtarget = "HandIK_2"
+    
+  
 # Export Node Point positions to .bindec file
 def export_bindec(filepath, dependencies_xml, model_xml):
     
@@ -168,6 +425,10 @@ def export_bindec(filepath, dependencies_xml, model_xml):
 # Import .bindec file
 def import_bindec(filepath, dependencies_xml="", model_xml=""):
     settings = bpy.context.scene.gymnast_tool_props
+    
+    if settings.use_armature:
+        setup_armature_follow_node(dependencies_xml, model_xml)
+    
     use_spline = settings.use_spline
     pivot_node_name = settings.pivot_node
     start_frame = settings.start_frame
@@ -277,8 +538,9 @@ def import_bindec(filepath, dependencies_xml="", model_xml=""):
     
     scene.frame_end = new_start_frame + (binary_blocks_count - start_frame)
     scene.frame_set(new_start_frame)
-    return {'FINISHED'}
-
+    
+    if settings.use_armature:
+        armature_bake(dependencies_xml, model_xml)
 
 
 # #################### #
@@ -422,6 +684,26 @@ class GymnastToolSettings(bpy.types.PropertyGroup):
         default=1,
         min=1
     )
+    use_armature: bpy.props.BoolProperty(
+        name="Use Armature",
+        description="Apply the animation to Armature instead of node point.\nNote: This feature isn't compatible with custom rigs.\nDefault: False",
+        default=False
+    )
+    armature_object: bpy.props.PointerProperty(
+        name="Armature",
+        description="The Armature for the animation to be imported into.",
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'ARMATURE'
+    )
+    armature_rig_type: bpy.props.EnumProperty(
+        name="Type",
+        description="Choose the type of rig\nDefault: VECTOR",
+        items=[
+            ('VECTOR', "Vector", "Vector's Rig"),
+            ('SHADOW FIGHT 2', "Shadow Fight 2", "Shadow Fight 2's Rig")
+        ],
+        default='VECTOR',
+    )
 
 
 class CompileBinOperator(bpy.types.Operator):
@@ -528,7 +810,14 @@ class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
     def draw(self, context):
         props = context.scene.gymnast_tool_props
         layout = self.layout
+        box2 = layout.box()
         box = layout.box()
+        
+        box2.label(text="Armature")
+        box2.prop(context.scene.gymnast_tool_props, "use_armature")
+        box2.prop(context.scene.gymnast_tool_props, "armature_object")
+        box2.prop(context.scene.gymnast_tool_props, "armature_rig_type")
+        
         box.label(text="Splining")
         box.prop(context.scene.gymnast_tool_props, "use_spline")
         if props.use_spline:
