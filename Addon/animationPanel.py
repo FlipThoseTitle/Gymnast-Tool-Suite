@@ -11,7 +11,7 @@ import struct
 import xml.etree.ElementTree as ET
 
 # Node to Bone
-NODE_TO_BONE = {
+NODE_TO_BONE_VECTOR = {
     "NTop": "Head",
     "NHead": "Head",
     "NHeadF": "HeadF",
@@ -55,6 +55,76 @@ NODE_TO_BONE = {
     "NToeTip_2": "Toes_2",
     "NToeTip_1": "Toes_1",
     "COM": "COM"
+}
+
+NODE_TO_BONE_SF2 = {
+    "NTop": "Head",
+    "NHead": "Head",
+    "NHeadF": "HeadF",
+    "NHeadS_2": "HeadF",
+    "NHeadS_1": "HeadF",
+    "NNeck": "Neck",
+    "NShoulder_2": "Clavicle_2",
+    "NShoulder_1": "Clavicle_1",
+    "NElbow_2": "Arm_2",
+    "NElbow_1": "Arm_1",
+    "NWrist_2": "Forearm_2",
+    "NWrist_1": "Forearm_1",
+    "NKnuckles_2": "Hand_2",
+    "NKnuckles_1": "Hand_1",
+    "NKnucklesS_2": "Hand_2",
+    "NKnucklesS_1": "Hand_1",
+    "NFingertips_2": "Fingers_2",
+    "NFingertips_1": "Fingers_1",
+    "NFingertipsS_2": "Fingers_2",
+    "NFingertipsS_1": "Fingers_1",
+    "NFingertipsSS_2": "FingersS_2",
+    "NFingertipsSS_1": "FingersS_1",
+    "NChest": "Chest",
+    "NChestF": "Chest",
+    "NChestS_2": "Chest",
+    "NChestS_1": "Chest",
+    "NStomach": "Stomach",
+    "NStomachF": "Stomach",
+    "NStomachS_2": "Stomach",
+    "NStomachS_1": "Stomach",
+    "NPivot": "Pelvis",
+    "NPelvisF": "Pelvis",
+    "NHip_2": "Hip_2",
+    "NHip_1": "Hip_1",
+    "NKnee_2": "Thigh_2",
+    "NKnee_1": "Thigh_1",
+    "NAnkle_2": "Calf_2",
+    "NAnkle_1": "Calf_1",
+    "NHeel_2": "Heel_2",
+    "NHeel_1": "Heel_1",
+    "NToe_2": "Foot_2",
+    "NToe_1": "Foot_1",
+    "NToeS_2": "Foot_2",
+    "NToeS_1": "Foot_1",
+    "NToeTip_2": "Toes_2",
+    "NToeTip_1": "Toes_1",
+    "COM": "COM",
+    "MacroNode1_1": "Hand_1",
+    "MacroNode1_2": "Hand_2",
+    "MacroNode2_1": "Hand_1",
+    "MacroNode2_2": "Hand_2",
+    "MacroNode3_1": "Hand_1",
+    "MacroNode3_2": "Hand_2",
+    "MacroNode4_1": "Fingers_1",
+    "MacroNode4_2": "Fingers_2",
+    "MacroNode5_1": "FingersS_1",
+    "MacroNode5_2": "FingersS_2",
+    "MacroNode6_1": "FingersS_1",
+    "MacroNode6_2": "FingersS_2",
+    "Weapon-Node1_1": "Weapon_1",
+    "Weapon-Node2_1": "Weapon_1",
+    "Weapon-Node3_1": "Weapon_1",
+    "Weapon-Node4_1": "Weapon_1",
+    "Weapon-Node1_2": "Weapon_2",
+    "Weapon-Node2_2": "Weapon_2",
+    "Weapon-Node3_2": "Weapon_2",
+    "Weapon-Node4_2": "Weapon_2"
 }
 
 
@@ -199,6 +269,29 @@ def setup_armature_follow_node(dependencies_xml="", model_xml=""):
 
     limit = len(node_order)  # Use node count as limit
     
+    IgnoreList = [
+        "MacroNode1_1",
+        "MacroNode1_2",
+        "MacroNode2_1",
+        "MacroNode2_2",
+        "MacroNode3_1",
+        "MacroNode3_2",
+        "MacroNode4_1",
+        "MacroNode4_2",
+        "MacroNode5_1",
+        "MacroNode5_2",
+        "MacroNode6_1",
+        "MacroNode6_2",
+        "Weapon-Node1_1",
+        "Weapon-Node2_1",
+        "Weapon-Node3_1",
+        "Weapon-Node4_1",
+        "Weapon-Node1_2",
+        "Weapon-Node2_2",
+        "Weapon-Node3_2",
+        "Weapon-Node4_2"
+    ]
+    
     for i, name in enumerate(node_order[:limit]):
         node = bpy.data.objects.get(name)
         if node:
@@ -208,28 +301,29 @@ def setup_armature_follow_node(dependencies_xml="", model_xml=""):
                     
         node_name = name
         
-        if node_name == "NWrist_1":
-            bone = armature.pose.bones.get("HandIK_1")
-            constraint = bone.constraints.new(type='COPY_LOCATION')
-            constraint.target = node
-        if node_name == "NWrist_2":
-            bone = armature.pose.bones.get("HandIK_2")
-            constraint = bone.constraints.new(type='COPY_LOCATION')
-            constraint.target = node
-        
-        if node_name == "NAnkle_1":
-            bone = armature.pose.bones.get("HeelIK_1")
-            constraint = bone.constraints.new(type='COPY_LOCATION')
-            constraint.target = node
-        if node_name == "NAnkle_2":
-            bone = armature.pose.bones.get("HeelIK_2")
-            constraint = bone.constraints.new(type='COPY_LOCATION')
-            constraint.target = node
-        
-        if node_name == "COM":
-            bone = armature.pose.bones.get("COM")
-            constraint = bone.constraints.new(type='COPY_LOCATION')
-            constraint.target = node
+        if settings.use_armature_ik:
+            if node_name == "NWrist_1":
+                bone = armature.pose.bones.get("HandIK_1")
+                constraint = bone.constraints.new(type='COPY_LOCATION')
+                constraint.target = node
+            if node_name == "NWrist_2":
+                bone = armature.pose.bones.get("HandIK_2")
+                constraint = bone.constraints.new(type='COPY_LOCATION')
+                constraint.target = node
+            
+            if node_name == "NAnkle_1":
+                bone = armature.pose.bones.get("HeelIK_1")
+                constraint = bone.constraints.new(type='COPY_LOCATION')
+                constraint.target = node
+            if node_name == "NAnkle_2":
+                bone = armature.pose.bones.get("HeelIK_2")
+                constraint = bone.constraints.new(type='COPY_LOCATION')
+                constraint.target = node
+            
+            if node_name == "COM":
+                bone = armature.pose.bones.get("COM")
+                constraint = bone.constraints.new(type='COPY_LOCATION')
+                constraint.target = node
 
         if node_name == "NToeS_1":
             bone = armature.pose.bones.get("Foot_1")
@@ -264,8 +358,84 @@ def setup_armature_follow_node(dependencies_xml="", model_xml=""):
             constraint.track_axis = 'TRACK_Z'
             constraint.lock_axis = 'LOCK_Y'
         
-        if node_name.endswith("S_1") or node_name.endswith("S_2") or node_name == "NTop" or node_name == "Camera" or node_name == "DetectorH" or node_name == "DetectorV":
+        if settings.armature_rig_type == "SHADOW FIGHT 2":
+            if node_name == "NFingertipsSS_2":
+                bone = armature.pose.bones.get("FingersS_2")
+                constraint = bone.constraints.new(type='DAMPED_TRACK')
+                constraint.target = bpy.data.objects.get(node_name)
+            elif node_name == "NFingertipsSS_1":
+                bone = armature.pose.bones.get("FingersS_1")
+                constraint = bone.constraints.new(type='DAMPED_TRACK')
+                constraint.target = bpy.data.objects.get(node_name)
+            
+            if node_name == "NFingertipsS_1":
+                bone = armature.pose.bones.get("Fingers_1")
+                constraint = bone.constraints.new(type='LOCKED_TRACK')
+                constraint.target = node
+                constraint.track_axis = 'TRACK_Z'
+                constraint.lock_axis = 'LOCK_Y'
+            elif node_name == "NFingertipsS_2":
+                bone = armature.pose.bones.get("Fingers_2")
+                constraint = bone.constraints.new(type='LOCKED_TRACK')
+                constraint.target = node
+                constraint.track_axis = 'TRACK_Z'
+                constraint.lock_axis = 'LOCK_Y'
+            
+            if node_name == "MacroNode5_1":
+                bone = armature.pose.bones.get("FingersS_1")
+                constraint = bone.constraints.new(type='LOCKED_TRACK')
+                constraint.target = node
+                constraint.track_axis = 'TRACK_Z'
+                constraint.lock_axis = 'LOCK_Y'
+            elif node_name == "MacroNode5_2":
+                bone = armature.pose.bones.get("FingersS_2")
+                constraint = bone.constraints.new(type='LOCKED_TRACK')
+                constraint.target = node
+                constraint.track_axis = 'TRACK_Z'
+                constraint.lock_axis = 'LOCK_Y'
+            
+            if settings.affect_weaponnode:
+            
+                if node_name == "Weapon-Node2_1":
+                    bone = armature.pose.bones.get("Weapon_1")
+                    constraint = bone.constraints.new(type='COPY_LOCATION')
+                    constraint.target = node
+                elif node_name == "Weapon-Node2_2":
+                    bone = armature.pose.bones.get("Weapon_2")
+                    constraint = bone.constraints.new(type='COPY_LOCATION')
+                    constraint.target = node
+                
+                if node_name == "Weapon-Node3_1":
+                    bone = armature.pose.bones.get("Weapon_1")
+                    constraint = bone.constraints.new(type='DAMPED_TRACK')
+                    constraint.target = bpy.data.objects.get(node_name)
+                elif node_name == "Weapon-Node3_2":
+                    bone = armature.pose.bones.get("Weapon_2")
+                    constraint = bone.constraints.new(type='DAMPED_TRACK')
+                    constraint.target = bpy.data.objects.get(node_name)
+                
+                if node_name == "Weapon-Node4_1":
+                    bone = armature.pose.bones.get("Weapon_1")
+                    constraint = bone.constraints.new(type='LOCKED_TRACK')
+                    constraint.target = node
+                    constraint.track_axis = 'TRACK_Z'
+                    constraint.lock_axis = 'LOCK_Y'
+                elif node_name == "Weapon-Node4_2":
+                    bone = armature.pose.bones.get("Weapon_2")
+                    constraint = bone.constraints.new(type='LOCKED_TRACK')
+                    constraint.target = node
+                    constraint.track_axis = 'TRACK_Z'
+                    constraint.lock_axis = 'LOCK_Y'
+            
+        if node_name.endswith("S_1") or node_name.endswith("S_2") or node_name == "NTop":
             continue
+            
+        if settings.armature_rig_type == "VECTOR":
+            if node_name == "Camera" or node_name == "DetectorH" or node_name == "DetectorV":
+                continue
+        else:
+            if node_name in IgnoreList:
+                continue
         
         if node_name == "NHeadF":
             bone = armature.pose.bones.get("HeadF")
@@ -278,8 +448,10 @@ def setup_armature_follow_node(dependencies_xml="", model_xml=""):
         else:
             fbone = False
         
-        bone_id = NODE_TO_BONE.get(node_name)
-        print(node_name)
+        if settings.armature_rig_type == "VECTOR":
+            bone_id = NODE_TO_BONE_VECTOR.get(node_name)
+        else:
+            bone_id = NODE_TO_BONE_SF2.get(node_name)
         bone = armature.pose.bones.get(bone_id)
         if bone:
             if fbone:
@@ -353,38 +525,70 @@ def armature_bake(dependencies_xml="", model_xml=""):
     
     for frame in range(scene.frame_start, scene.frame_end):
         for i, name in enumerate(node_order[:limit]):
-            if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
-                continue
+            if settings.armature_rig_type == "VECTOR":
+                if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
+                    continue
+            else:
+                if name == "COM":
+                    continue
+                    
             node = bpy.data.objects.get(name)
             node.keyframe_delete(data_path="location", frame=frame)
-            
-    for i, name in enumerate(node_order[:limit]):
-        if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
-            continue
-            
-        node = bpy.data.objects.get(name)
-        constraint = node.constraints.new(type='CHILD_OF')
-        constraint.target = armature
-        
-        bone_id = NODE_TO_BONE.get(name)
-        constraint.subtarget = bone_id
-        
-    IK_BONES = ["Calf_1", "Calf_2", "Forearm_1", "Forearm_2"]
-    for i, name in enumerate(IK_BONES[:4]):
-        bone = armature.pose.bones.get(name)
-        constraint = bone.constraints.new(type='IK')
-        constraint.chain_count = 2
-        constraint.target = armature
-        
-        if name == "Calf_1":
-            constraint.subtarget = "HeelIK_1"
-        if name == "Calf_2":
-            constraint.subtarget = "HeelIK_2"
-        if name == "Forearm_1":
-            constraint.subtarget = "HandIK_1"
-        if name == "Forearm_2":
-            constraint.subtarget = "HandIK_2"
     
+    if settings.use_armature_ik:
+        for i, name in enumerate(node_order[:limit]):
+            if settings.armature_rig_type == "VECTOR":
+                if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
+                    continue
+            else:
+                if name == "COM":
+                    continue
+                
+            node = bpy.data.objects.get(name)
+            constraint = node.constraints.new(type='CHILD_OF')
+            constraint.target = armature
+            
+            if settings.armature_rig_type == "VECTOR":
+                bone_id = NODE_TO_BONE_VECTOR.get(name)
+            else:
+                bone_id = NODE_TO_BONE_SF2.get(name)
+                
+            constraint.subtarget = bone_id
+            
+        IK_BONES = ["Calf_1", "Calf_2", "Forearm_1", "Forearm_2"]
+        for i, name in enumerate(IK_BONES[:4]):
+            bone = armature.pose.bones.get(name)
+            constraint = bone.constraints.new(type='IK')
+            constraint.chain_count = 2
+            constraint.target = armature
+            
+            if name == "Calf_1":
+                constraint.subtarget = "HeelIK_1"
+            if name == "Calf_2":
+                constraint.subtarget = "HeelIK_2"
+            if name == "Forearm_1":
+                constraint.subtarget = "HandIK_1"
+            if name == "Forearm_2":
+                constraint.subtarget = "HandIK_2"
+    else:
+        for i, name in enumerate(node_order[:limit]):
+            if settings.armature_rig_type == "VECTOR":
+                if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
+                    continue
+            else:
+                if name == "COM":
+                    continue
+                
+            node = bpy.data.objects.get(name)
+            constraint = node.constraints.new(type='CHILD_OF')
+            constraint.target = armature
+
+            if settings.armature_rig_type == "VECTOR":
+                bone_id = NODE_TO_BONE_VECTOR.get(name)
+            else:
+                bone_id = NODE_TO_BONE_SF2.get(name)
+            
+            constraint.subtarget = bone_id
   
 # Export Node Point positions to .bindec file
 def export_bindec(filepath, dependencies_xml, model_xml):
@@ -686,7 +890,12 @@ class GymnastToolSettings(bpy.types.PropertyGroup):
     )
     use_armature: bpy.props.BoolProperty(
         name="Use Armature",
-        description="Apply the animation to Armature instead of node point.\nNote: This feature isn't compatible with custom rigs.\nDefault: False",
+        description="Apply the animation to Armature instead of node point.\nNote: This feature isn't compatible with custom rigs and spline.\nDefault: False",
+        default=False
+    )
+    use_armature_ik: bpy.props.BoolProperty(
+        name="Use IK",
+        description="Use IK Rig.\nDefault: False",
         default=False
     )
     armature_object: bpy.props.PointerProperty(
@@ -703,6 +912,11 @@ class GymnastToolSettings(bpy.types.PropertyGroup):
             ('SHADOW FIGHT 2', "Shadow Fight 2", "Shadow Fight 2's Rig")
         ],
         default='VECTOR',
+    )
+    affect_weaponnode: bpy.props.BoolProperty(
+        name="Affect WeaponNode",
+        description="Import animations to the character and weapon's armature.\nDisabling this will make the the importing ignore the Weapon Bone.\nDefault: False",
+        default=False
     )
 
 
@@ -815,15 +1029,19 @@ class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
         
         box2.label(text="Armature")
         box2.prop(context.scene.gymnast_tool_props, "use_armature")
-        box2.prop(context.scene.gymnast_tool_props, "armature_object")
-        box2.prop(context.scene.gymnast_tool_props, "armature_rig_type")
+        if props.use_armature:
+            box2.prop(context.scene.gymnast_tool_props, "use_armature_ik")
+            if props.armature_rig_type == "SHADOW FIGHT 2":
+                box2.prop(context.scene.gymnast_tool_props, "affect_weaponnode")
+            box2.prop(context.scene.gymnast_tool_props, "armature_object")
+            box2.prop(context.scene.gymnast_tool_props, "armature_rig_type")
         
         box.label(text="Splining")
         box.prop(context.scene.gymnast_tool_props, "use_spline")
         if props.use_spline:
             box.prop(context.scene.gymnast_tool_props, "stay_in_place")
-        box.prop(context.scene.gymnast_tool_props, "pivot_node")
-        box.prop(context.scene.gymnast_tool_props, "start_frame")
+            box.prop(context.scene.gymnast_tool_props, "pivot_node")
+            box.prop(context.scene.gymnast_tool_props, "start_frame")
 
 class VIEW3D_PT_gymnast_animation_settings_miscellaneous(bpy.types.Panel):
     bl_label = "Miscellaneous"
