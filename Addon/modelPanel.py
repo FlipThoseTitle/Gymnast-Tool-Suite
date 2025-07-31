@@ -1913,7 +1913,7 @@ class ExportModelToXML(bpy.types.Operator):
                                       LCC4=str(lcc_values[3]))
             
             if settings.model_include_necessary_tri_body:
-                add_necessary_triangle_body_gear(prefix, figures_element)
+                add_necessary_triangle_body_gear(context, prefix, figures_element)
         
         elif model_type == "RANGED":
             if obj:
@@ -4634,21 +4634,6 @@ class GymnastToolModelSettings(bpy.types.PropertyGroup):
         description="Select the object to be referenced as attack edges for weapon 2.",
         type=bpy.types.Object
     )
-    model_custom_childnode: bpy.props.BoolProperty(
-        name="Custom ChildNodes", 
-        description="Define a custom childnodes.\nDefault: False", 
-        default=False
-    )
-    model_custom_childnode_macronode_group_general: bpy.props.EnumProperty(
-        name="MacroNode Group",
-        description="The Vertex Group containing the Object's Vertices that will be a MacroNode.",
-        items=get_general_vertex_groups
-    )
-    model_custom_childnode_group_general: bpy.props.EnumProperty(
-        name="ChildNode Group",
-        description="The Vertex Group containing the Object's Vertices that will be referenced as a ChildNode.\nUsually consisting of 4 Vertices that forms a Tetrahedron shape.",
-        items=get_general_vertex_groups
-    )
     model_use_pivot: bpy.props.BoolProperty(
         name="Use Pivot",
         description="Whether or not to specify which vertex should be a Pivot Node.\nIf you disable this and try to load the model in, the game may crash.\nDefault: True",
@@ -4688,6 +4673,56 @@ class GymnastToolModelSettings(bpy.types.PropertyGroup):
         name="Flipped",
         description="Whether or not the damped track should be flipped.\nNormally, Vector and SF2 rig has swapped side, 1 will be swapped with 2 (Ex. NAnkle_1 --> NAnkle_2)\nVector = True, SF2 = False\nDefault: False",
         default=False
+    )
+    model_custom_childnode: bpy.props.BoolProperty(
+        name="Custom ChildNodes", 
+        description="**WORK IN PROGRESS: CURRENTLY FIXED AT ONLY 4 CHILDNODE\nDefine a custom childnodes.\nDefault: False", 
+        default=False
+    )
+    childnode_1_object: bpy.props.PointerProperty(
+        name="Childnode 1",
+        description="Select the object to be referenced as childnode 1 for Macronode.",
+        type=bpy.types.Object
+    )
+    childnode_2_object: bpy.props.PointerProperty(
+        name="Childnode 2",
+        description="Select the object to be referenced as childnode 2 for Macronode.",
+        type=bpy.types.Object
+    )
+    childnode_3_object: bpy.props.PointerProperty(
+        name="Childnode 3",
+        description="Select the object to be referenced as childnode 3 for Macronode.",
+        type=bpy.types.Object
+    )
+    childnode_4_object: bpy.props.PointerProperty(
+        name="Childnode 4",
+        description="Select the object to be referenced as childnode 4 for Macronode.",
+        type=bpy.types.Object
+    )
+    macronode_vertex_group: bpy.props.EnumProperty(
+        name="Macronode",
+        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode.",
+        items=get_general_vertex_groups
+    )
+    macronode_vertex_group_weapon_1: bpy.props.EnumProperty(
+        name="Macronode 1",
+        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode for the Weapon 1.",
+        items=get_weapon1_vertex_groups
+    )
+    macronode_vertex_group_weapon_2: bpy.props.EnumProperty(
+        name="Macronode 2",
+        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode for the Weapon 2.",
+        items=get_weapon2_vertex_groups
+    )
+    macronode_vertex_group_foot_1: bpy.props.EnumProperty(
+        name="Macronode 1",
+        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode for the Foot 1.",
+        items=get_foot1_vertex_groups
+    )
+    macronode_vertex_group_foot_2: bpy.props.EnumProperty(
+        name="Macronode 2",
+        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode for the Foot 2.",
+        items=get_foot2_vertex_groups
     )
     
 class MacroRuleItem(bpy.types.PropertyGroup):
@@ -4867,7 +4902,12 @@ class VIEW3D_PT_gymnast_model_settings_export(bpy.types.Panel):
             elif model_type == 'FOOT_GEAR':
                 box2.prop(context.scene.gymnast_tool_model_props, "model_export_cloth_foot1_folder")
                 box2.prop(context.scene.gymnast_tool_model_props, "model_export_cloth_foot2_folder")
-  
+        
+        box3 = layout.box()
+        box3.label(text="Childnode (WIP)")
+        
+        
+        
 class VIEW3D_PT_gymnast_settings_object_settings(bpy.types.Panel):
     bl_label = "Object Settings"
     bl_idname = "VIEW3D_PT_gymnast_settings_object_settings"

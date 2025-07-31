@@ -780,13 +780,22 @@ def import_bindec(filepath, dependencies_xml="", model_xml=""):
                             z = float(positions[i][1]) + pivot_offset[2]
                             y = -float(positions[i][2]) + pivot_offset[1]
                         
-                        obj.location = (x, y, z)
+                        if settings.flipped_animation: # note: (x,y,z) is actually (x,-z,y) converted from bin
+                            if settings.flipped_type == 'X':
+                                obj.location = (-x, y, z)
+                            elif settings.flipped_type == 'Y':
+                                obj.location = (x, y, -z)
+                            elif settings.flipped_type == 'Z':
+                                obj.location = (x, -y, z)
+                        else:
+                            obj.location = (x, y, z)
                         obj.keyframe_insert(data_path="location", frame=frame)
                         
             except ValueError:
                 continue
     
     scene.frame_end = new_start_frame + (binary_blocks_count - start_frame)
+    scene.frame_end -= 1
     scene.frame_set(new_start_frame)
     
     if settings.use_armature:
@@ -965,6 +974,21 @@ class GymnastToolSettings(bpy.types.PropertyGroup):
         description="Import animations to the character and weapon's armature.\nDisabling this will make the the importing ignore the Weapon Bone.\nDefault: False",
         default=False
     )
+    flipped_animation: bpy.props.BoolProperty(
+        name="Mirrored",
+        description="Mirror the imported animation.\nDefault: False",
+        default=False
+    )
+    flipped_type: bpy.props.EnumProperty(
+        name="Axis",
+        description="Axis to be mirrored\nDefault: Z",
+        items=[
+            ('X', "X", "Flip the X Axis."),
+            ('Y', "Y", "Flip the Y Axis."),
+            ('Z', "Z", "Flip the Z Axis.")
+        ],
+        default='Z',
+    )
 
 
 class CompileBinOperator(bpy.types.Operator):
@@ -1071,8 +1095,14 @@ class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
     def draw(self, context):
         props = context.scene.gymnast_tool_props
         layout = self.layout
+        box3 = layout.box()
         box2 = layout.box()
         box = layout.box()
+        
+        box3.label(text="Import Settings")
+        box3.prop(context.scene.gymnast_tool_props, "flipped_animation")
+        if props.flipped_animation:
+            box3.prop(context.scene.gymnast_tool_props, "flipped_type")
         
         box2.label(text="Armature")
         box2.prop(context.scene.gymnast_tool_props, "use_armature")
