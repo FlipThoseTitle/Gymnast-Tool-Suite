@@ -518,7 +518,7 @@ def armature_bake(dependencies_xml="", model_xml="", bake_start=None):
 
     limit = len(node_order)  # Use node count as limit
     
-    bake_start = bake_start if bake_start is not None else scene.frame_start # Use Spline Support
+    bake_start = bake_start if bake_start is not None else scene.frame_start # Spline Support
     
     # Bake animation
     bpy.ops.nla.bake(
@@ -597,6 +597,44 @@ def armature_bake(dependencies_xml="", model_xml="", bake_start=None):
                 bone_id = NODE_TO_BONE_SF2.get(name)
             
             constraint.subtarget = bone_id
+
+# Correct Constraint after Baking
+def correct_constraint():
+    settings = bpy.context.scene.gymnast_tool_props
+    armature = settings.armature_object
+
+    if armature is None or armature.type != 'ARMATURE':
+        print("Invalid armature")
+        return
+
+    bpy.context.view_layer.objects.active = armature
+    bpy.ops.object.mode_set(mode='POSE')
+
+    pairs = [
+        ("Hand_1", "Forearm_1"),
+        ("Hand_2", "Forearm_2"),
+        ("Heel_1", "Calf_1"),
+        ("Heel_2", "Calf_2")
+    ]
+
+    for bone_name, target_bone_name in pairs:
+        try:
+            pbone = armature.pose.bones[bone_name]
+        except KeyError:
+            print(f"Bone '{bone_name}' not found.")
+            continue
+
+        # Clear constraint
+        for c in pbone.constraints:
+            if c.type == 'COPY_LOCATION':
+                pbone.constraints.remove(c)
+
+        # Add new Copy Location constraint
+        constraint = pbone.constraints.new(type='COPY_LOCATION')
+        constraint.name = f"CopyLoc_{target_bone_name}"
+        constraint.target = armature
+        constraint.subtarget = target_bone_name
+        constraint.head_tail = 1.0 
   
 # Export Node Point positions to .bindec file
 def export_bindec(filepath, dependencies_xml, model_xml):
@@ -753,6 +791,7 @@ def import_bindec(filepath, dependencies_xml="", model_xml=""):
     
     if settings.use_armature:
         armature_bake(dependencies_xml, model_xml, bake_start=new_start_frame)
+        correct_constraint()
 
 
 # #################### #
