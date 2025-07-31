@@ -324,6 +324,11 @@ def setup_armature_follow_node(dependencies_xml="", model_xml=""):
                 bone = armature.pose.bones.get("COM")
                 constraint = bone.constraints.new(type='COPY_LOCATION')
                 constraint.target = node
+                
+            if node_name == "NPivot":
+                bone = armature.pose.bones.get("Root")
+                constraint = bone.constraints.new(type='COPY_LOCATION')
+                constraint.target = node
 
         if node_name == "NToeS_1":
             bone = armature.pose.bones.get("Foot_1")
@@ -491,7 +496,7 @@ def setup_armature_follow_node(dependencies_xml="", model_xml=""):
         index += 1
 
 # Armature Baking
-def armature_bake(dependencies_xml="", model_xml=""):
+def armature_bake(dependencies_xml="", model_xml="", bake_start=None):
     settings = bpy.context.scene.gymnast_tool_props
     scene = bpy.context.scene
     armature = settings.armature_object
@@ -513,17 +518,20 @@ def armature_bake(dependencies_xml="", model_xml=""):
 
     limit = len(node_order)  # Use node count as limit
     
+    bake_start = bake_start if bake_start is not None else scene.frame_start # Use Spline Support
+    
     # Bake animation
     bpy.ops.nla.bake(
-        frame_start=scene.frame_start,
+        frame_start=bake_start,
         frame_end=scene.frame_end,
         only_selected=False,
         visual_keying=True,
         clear_constraints=True,
+        use_current_action=True,
         bake_types={'POSE'}
     )
     
-    for frame in range(scene.frame_start, scene.frame_end):
+    for frame in range(bake_start, scene.frame_end):
         for i, name in enumerate(node_order[:limit]):
             if settings.armature_rig_type == "VECTOR":
                 if name == "DetectorH" or name == "DetectorV" or name == "COM" or name == "Camera":
@@ -744,7 +752,7 @@ def import_bindec(filepath, dependencies_xml="", model_xml=""):
     scene.frame_set(new_start_frame)
     
     if settings.use_armature:
-        armature_bake(dependencies_xml, model_xml)
+        armature_bake(dependencies_xml, model_xml, bake_start=new_start_frame)
 
 
 # #################### #
