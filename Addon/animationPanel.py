@@ -795,7 +795,6 @@ def import_bindec(filepath, dependencies_xml="", model_xml=""):
                 continue
     
     scene.frame_end = new_start_frame + (binary_blocks_count - start_frame)
-    scene.frame_end -= 1
     scene.frame_set(new_start_frame)
     
     if settings.use_armature:
