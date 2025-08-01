@@ -15,6 +15,7 @@ The add-on comes with three main tools:
 ***This addon is for Blender 4.4+ and does not support previous version.***
 
 To install the Gymnast Tool Suite addon:
+ * Download the addon: [Download Gymnast Tool Suite Adoon](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/releases)
  * Go into the blender preferences, by clicking on Main Header>Edit>Preferences
  * Go to the 'Add-ons' category, and click on 'Install' to install a new addon.
  * Use Install to install add-on from downloaded zip archive.
