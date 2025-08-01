@@ -9,6 +9,8 @@ The add-on comes with three main tools:
 - Model Tool
 - XML Tool
 
+<img width="337" height="602" alt="image" src="https://github.com/user-attachments/assets/9ad59b1d-2cde-4cc0-9108-4e721d9370f7" />
+
 ## Installation
 ***This addon is for Blender 4.4+ and does not support previous version.***
 
