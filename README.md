@@ -9,7 +9,7 @@ The add-on comes with three main tools:
 - Model Tool
 - XML Tool
 
-## Getting Started
+## Installation
 ***This addon is for Blender 4.4+ and does not support previous version.***
 
 To install the Gymnast Tool Suite addon:
@@ -25,3 +25,6 @@ Project includes .blend scenes for Vector and Shadow Fight 2, and additionally o
 - Armature IK
 - Armature
 - No Armature
+
+# Documentation
+Docmentation is available on the
