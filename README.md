@@ -30,4 +30,4 @@ Project includes .blend scenes for Vector and Shadow Fight 2, and additionally o
 - No Armature
 
 # Documentation
-Docmentation is available on the
+Docmentation is available on the [Gymnast Tool Suite Documentation Wiki](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/wiki)
