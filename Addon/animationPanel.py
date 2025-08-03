@@ -799,7 +799,8 @@ def import_bindec(filepath, dependencies_xml="", model_xml=""):
     
     if settings.use_armature:
         armature_bake(dependencies_xml, model_xml, bake_start=new_start_frame)
-        correct_constraint()
+        if settings.use_armature_ik:
+            correct_constraint()
 
 
 # #################### #
