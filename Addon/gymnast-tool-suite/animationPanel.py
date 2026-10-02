@@ -284,7 +284,7 @@ def import_bin(filepath, dependencies_xml="", model_xml=""):
     node_order = get_combined_node_order(dependencies_xml, model_xml)
     limit = len(node_order)
     
-    # Read the block count early to establish the valid frame limits
+    # Read the block count early to set frame limits
     with open(filepath, 'rb') as file:
         try:
             binary_blocks_count = struct.unpack("i", file.read(4))[0]
@@ -292,22 +292,30 @@ def import_bin(filepath, dependencies_xml="", model_xml=""):
             return {'CANCELLED'}
             
     scene = bpy.context.scene
-    pivot_node_obj = bpy.data.objects.get(settings.pivot_node) if settings.use_spline else None
+    pivot_node_obj = bpy.data.objects.get(settings.pivot_node) if (settings.use_spline or settings.stay_in_place) else None
     
     last_pivot_pos = None
+    stay_target_pos = None
     new_start_frame = scene.frame_start
 
     if settings.use_spline and pivot_node_obj:
         new_start_frame = scene.frame_current
-            
-        if not settings.stay_in_place: last_pivot_pos = pivot_node_obj.matrix_world.translation.copy()
+        if settings.stay_in_place:
+            stay_target_pos = pivot_node_obj.matrix_world.translation.copy()
+        else:
+            last_pivot_pos = pivot_node_obj.matrix_world.translation.copy()
     
     pivot_offset = (0, 0, 0)
     frames_to_import = max(0, binary_blocks_count - settings.start_frame)
     actual_frames_imported = 0
+    fps_ratio = scene.render.fps / 20.0
+    frame_step = fps_ratio / settings.animation_speed
+
+    # We find all objects before the loop starts to avoid querying 
+    # Blender database thousands of times per second
+    cached_objects = [bpy.data.objects.get(name) for name in node_order[:limit]]
 
     with open(filepath, 'rb') as file:
-        # Skip the block count as we already read it
         file.read(4) 
         
         # Fast forward through frames that are before settings.start_frame
@@ -319,19 +327,24 @@ def import_bin(filepath, dependencies_xml="", model_xml=""):
             except struct.error:
                 break
 
-        for frame in range(new_start_frame, new_start_frame + frames_to_import):
+        # Removed frame from the loop iterable because frame counts are dynamic now
+        for file_frame_idx in range(frames_to_import):
             try:
                 skip_byte = file.read(1)
                 if not skip_byte: break
                 node_count = struct.unpack("i", file.read(4))[0]
                 
-                positions = []
-                for _ in range(node_count):
-                    x, y, z = struct.unpack("fff", file.read(12))
-                    positions.append((x, y, z))
+                raw_data = file.read(12 * node_count)
+                if len(raw_data) < 12 * node_count:
+                    break
+                    
+                positions_flat = struct.unpack(f"{node_count * 3}f", raw_data)
+                positions = [positions_flat[i*3 : i*3+3] for i in range(node_count)]
+                
             except struct.error:
                 break
                 
+            target_frame = new_start_frame + (actual_frames_imported * frame_step)
             actual_frames_imported += 1
             
             # Pad empty nodes if the node count in the frame is less than expected limits
@@ -339,37 +352,42 @@ def import_bin(filepath, dependencies_xml="", model_xml=""):
                 positions.extend([(0.0, 0.0, 0.0)] * (limit - len(positions)))
 
             offset = (0,0,0)
-            if settings.use_spline and pivot_node_obj and settings.pivot_node in node_order:
+            if (settings.use_spline or settings.stay_in_place) and pivot_node_obj and settings.pivot_node in node_order:
                 p_idx = node_order.index(settings.pivot_node)
-                # Remap the target position back from bin coordinates: 
-                # (positions[0] = x, positions[1] = z, positions[2] = -y)
+                # Remap the target position back from bin coordinates
                 p_new_pos = (positions[p_idx][0], -positions[p_idx][2], positions[p_idx][1])
                 
                 if settings.stay_in_place:
-                    p_last_pos = pivot_node_obj.matrix_world.translation
-                    offset = (p_last_pos[0] - p_new_pos[0], p_last_pos[1] - p_new_pos[1], p_last_pos[2] - p_new_pos[2])
-                elif last_pivot_pos and frame == new_start_frame:
+                    if stay_target_pos is None:
+                        # Captures the pivot's position on the first frame as the anchor
+                        stay_target_pos = p_new_pos
+                    offset = (stay_target_pos[0] - p_new_pos[0], stay_target_pos[1] - p_new_pos[1], stay_target_pos[2] - p_new_pos[2])
+                elif settings.use_spline and last_pivot_pos and actual_frames_imported == 1:
                     pivot_offset = (last_pivot_pos[0] - p_new_pos[0], last_pivot_pos[1] - p_new_pos[1], last_pivot_pos[2] - p_new_pos[2])
             
             active_offset = offset if settings.stay_in_place else pivot_offset
 
-            for i, name in enumerate(node_order[:limit]):
-                obj = bpy.data.objects.get(name)
+            # Loop directly through our prefetched objects
+            for i, obj in enumerate(cached_objects):
                 if obj:
                     x = positions[i][0] + active_offset[0]
                     z = positions[i][1] + active_offset[2]
                     y = -positions[i][2] + active_offset[1]
                     
+                    # Update location reliably so the dependency graph catches it
                     if settings.flipped_animation:
                         if settings.flipped_type == 'X': obj.location = (-x, y, z)
                         elif settings.flipped_type == 'Y': obj.location = (x, y, -z)
                         elif settings.flipped_type == 'Z': obj.location = (x, -y, z)
                     else:
                         obj.location = (x, y, z)
-                    obj.keyframe_insert(data_path="location", frame=frame)
+                        
+                    obj.keyframe_insert(data_path="location", frame=target_frame)
     
     if actual_frames_imported > 0:
-        scene.frame_end = new_start_frame + actual_frames_imported - 1
+        # Scale end-frame properly
+        scene.frame_end = int(new_start_frame + (actual_frames_imported - 1) * frame_step)
+        
     scene.frame_set(new_start_frame)
     
     if settings.use_armature:
@@ -482,6 +500,12 @@ class GymnastToolSettings(bpy.types.PropertyGroup):
     flipped_type: bpy.props.EnumProperty(
         name="Axis", items=[('X', "X", ""), ('Y', "Y", ""), ('Z', "Z", "")], default='Z',
     )
+    animation_speed: bpy.props.FloatProperty(
+        name="Animation Speed", 
+        description="Playback speed factor.", 
+        default=1.0, 
+        min=0.01
+    )
 
 class VIEW3D_PT_gymnast_animation_panel(bpy.types.Panel):
     bl_label, bl_idname, bl_space_type, bl_region_type, bl_category = "Animation Tools", "VIEW3D_PT_gymnast_animation_panel", 'VIEW_3D', 'UI', 'Gymnast Tool Suite'
@@ -511,6 +535,7 @@ class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
         box3.label(text="Import Settings")
         box3.prop(props, "flipped_animation")
         if props.flipped_animation: box3.prop(props, "flipped_type")
+        box3.prop(props, "animation_speed")
         
         box2.label(text="Armature")
         box2.prop(props, "use_armature")
@@ -520,11 +545,14 @@ class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
             box2.prop(props, "armature_object")
             box2.prop(props, "armature_rig_type")
         
-        box.label(text="Splining")
+        box.label(text="Splining & Positioning")
         box.prop(props, "use_spline")
-        if props.use_spline:
-            box.prop(props, "stay_in_place")
+        box.prop(props, "stay_in_place")
+        
+        if props.use_spline or props.stay_in_place:
             box.prop(props, "pivot_node")
+            
+        if props.use_spline:
             box.prop(props, "start_frame")
 
 # ------------- Registration -------------

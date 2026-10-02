@@ -18,18 +18,20 @@
 
 if "bpy" not in locals():
     from . import animationPanel
+    from . import moveEditor
     from . import modelPanel
 else:
     import importlib
 
     importlib.reload(animationPanel)
+    importlib.reload(moveEditor)
     importlib.reload(modelPanel)
 
 bl_info = {
     "name": "Gymnast Tool Suite",
     "description": "Create Custom Animation and Model for Vector and Shadow Fight 2",
     "author": "FlipThoseTitle",
-    "version": (1, 1, 5),
+    "version": (1, 1, 6),
     "blender": (4, 4, 0),
     "location": "View3D > Panels > Gymnast Tool Suite",
     "category": "Object",
@@ -39,7 +41,7 @@ bl_info = {
 
 import bpy
 
-classes = [animationPanel, modelPanel]
+classes = [animationPanel, modelPanel, moveEditor]
 
 def register():
     for c in classes:
