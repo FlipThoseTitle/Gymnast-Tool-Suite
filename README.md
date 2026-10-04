@@ -11,7 +11,7 @@ The add-on comes with three main tools:
 <img width="337" height="602" alt="image" src="https://github.com/user-attachments/assets/9ad59b1d-2cde-4cc0-9108-4e721d9370f7" />
 
 ## Installation
-***This addon is for Blender 4.4+ and does not support previous version.***
+***This addon is for Blender 5.2+ and does not support previous version.***
 
 To install the Gymnast Tool Suite addon:
  * Download the addon: [Download Gymnast Tool Suite Adoon](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/releases)
