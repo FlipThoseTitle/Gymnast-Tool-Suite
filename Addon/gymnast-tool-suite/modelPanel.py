@@ -2,1360 +2,1210 @@
 # Model Panel
 # #################### #
 
-import bpy
-import bmesh
-import os
+#  Axis convention:   XML (X, Y, Z)  <->  Blender (x, -z, y)
+#  Exporter:  X = x,  Y = z,  Z = -y
+
+
 import math
-import mathutils
-import xml.etree.ElementTree as ET
+import os
 import xml.dom.minidom as minidom
+import xml.etree.ElementTree as ET
+from collections import Counter, namedtuple
 
-from mathutils import Vector
+import bmesh
+import bpy
+from bpy.props import (BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty)
+from mathutils import Matrix
 
 
-# #################### #
-# Functions
-# #################### #
 
-def safe_float(val):
-    """Safely convert a string to float, handling regional comma decimals."""
-    if not val or val == "Null": 
-        return 0.0
-    return float(str(val).replace(',', '.'))
 
-def _get_vgroups(obj):
-    if obj and obj.type == 'MESH' and obj.vertex_groups:
-        return [(vg.name, vg.name, "") for vg in obj.vertex_groups]
-    return [("None", "None", "No vertex groups available")]
+# ============================================================================ #
+#  Constants
+# ============================================================================ #
 
-def get_general_vertex_groups(self, context):
-    settings = context.scene.gymnast_tool_model_props
-    if settings.model_type_export in {'HEAD_GEAR', 'MODEL', 'BODY_GEAR', 'RANGED'}:
-        return _get_vgroups(settings.selected_object)
-    return [("None", "None", "Not applicable")]
+CATEGORY = "Gymnast Tool Suite"
+ROOT_COLLECTION = "Model"
+CAPSULE_GROUP = "Smooth Capsules"     # geometry node group used by capsule objects
+RIG_GROUP = "GTS LCC Rig"             # geometry node group used by "Bind to Skeleton"
+RIG_PREFIX = "LCC_"                   # name prefix of every vertex group / modifier the binder creates
 
-def get_weapon1_vertex_groups(self, context):
-    if context.scene.gymnast_tool_model_props.model_type_export == 'WEAPON':
-        return _get_vgroups(context.scene.gymnast_tool_model_props.weapon_object_1)
-    return [("None", "None", "Not applicable")]
-    
-def get_weapon2_vertex_groups(self, context):
-    if context.scene.gymnast_tool_model_props.model_type_export == 'WEAPON':
-        return _get_vgroups(context.scene.gymnast_tool_model_props.weapon_object_2)
-    return [("None", "None", "Not applicable")]
+# The four ChildNodes (in LCC order) each gear type is attached to.
+NODE_SETS = {
+    'HEAD':     ("NTop", "NHeadS_2", "NHeadS_1", "NHeadF"),
+    'FOOT_1':   ("NToeS_1", "NToe_1", "NHeel_1", "NAnkle_1"),
+    'FOOT_2':   ("NToeS_2", "NToe_2", "NHeel_2", "NAnkle_2"),
+    'WEAPON_1': ("Weapon-Node4_1", "Weapon-Node3_1", "Weapon-Node2_1", "Weapon-Node1_1"),
+    'WEAPON_2': ("Weapon-Node4_2", "Weapon-Node3_2", "Weapon-Node2_2", "Weapon-Node1_2"),
+    'RANGED':   ("Ranged-Node1_1", "Ranged-Node2_1", "Ranged-Node3_1", "Ranged-Node4_1"),
+}
 
-def get_foot1_vertex_groups(self, context):
-    if context.scene.gymnast_tool_model_props.model_type_export == 'FOOT_GEAR':
-        return _get_vgroups(context.scene.gymnast_tool_model_props.foot_object_1)
-    return [("None", "None", "Not applicable")]
+# Body gear is split by height into Top / Middle / Bottom, each one attached to one of these profiles.
+BODY_PROFILES = {
+    'CHEST':   ("NChestS_1", "NChestF", "NChestS_2", "NNeck"),
+    'STOMACH': ("NStomachS_1", "NStomachF", "NStomachS_2", "NChest"),
+    'HIP':     ("NPelvisF", "NHip_1", "NHip_2", "NStomach"),
+}
 
-def get_foot2_vertex_groups(self, context):
-    if context.scene.gymnast_tool_model_props.model_type_export == 'FOOT_GEAR':
-        return _get_vgroups(context.scene.gymnast_tool_model_props.foot_object_2)
-    return [("None", "None", "Not applicable")]
+# (suffix, Node1, Node2, Node3) - optional triangles that hide the hole next to SF2 feet.
+FOOT_TRIANGLES = (
+    ("1_1", "NHeel_1", "NToe_1", "NAnkle_1"),
+    ("2_1", "NToeS_1", "NToe_1", "NHeel_1"),
+    ("1_2", "NHeel_2", "NToe_2", "NAnkle_2"),
+    ("2_2", "NHeel_2", "NToeS_2", "NToe_2"),
+    ("3_2", "NToeS_2", "NToe_2", "NAnkle_2"),
+)
 
-def refresh_enum(self, context):
-    for area in context.screen.areas:
-        if area.type == 'VIEW_3D':
-            area.tag_redraw()
+MACRO_TEMPLATES = {
+    'ARMOR': (
+        ("Armor_Top", "NChestS_2,NChestF,NChestS_1,NNeck"),
+        ("Armor_Middle", "NStomachS_2,NStomachF,NStomachS_1,NChest"),
+        ("Armor_Bottom", "NHip_1,NPelvisF,NHip_2,NStomach"),
+    ),
+    'WEAPON': (
+        ("Weapon_1", ",".join(NODE_SETS['WEAPON_1'])),
+        ("Weapon_2", ",".join(NODE_SETS['WEAPON_2'])),
+    ),
+}
 
-def get_triangulated_data(obj):
-    """triangulate mesh and return vertices, edges, polygons."""
-    mesh = obj.to_mesh()
-    bm = bmesh.new()
-    bm.from_mesh(mesh)
-    bmesh.ops.triangulate(bm, faces=bm.faces[:])
-    bm.to_mesh(mesh)
-    bm.free()
-    return mesh, mesh.vertices, mesh.edges, mesh.polygons
+BODY_ITEMS = [
+    ('CHEST', "Chest", "Chest area, from the upper torso to the neck."),
+    ('STOMACH', "Stomach", "Stomach area, between the chest and the hip."),
+    ('HIP', "Hip", "Hip area, below the middle torso."),
+]
+
+
+
+
+# ============================================================================ #
+#  Helpers
+# ============================================================================ #
+
+class ModelError(Exception):
+    """A problem shown in Blender's status bar."""
+
+def safe_float(val, default=0.0):
+    """XML text -> float. Accepts comma decimals, 'Null' and missing values."""
+    if val is None or val in ("", "Null"):
+        return default
+    try:
+        return float(str(val).replace(',', '.'))
+    except ValueError:
+        return default
+
+def xml_to_blender(x, y, z):
+    return (x, -z, y)
+
+def xml_pos(element):
+    return (safe_float(element.get('X')), safe_float(element.get('Y')), safe_float(element.get('Z')))
+
+def xml_attribs(pos):
+    """Blender position -> XML coordinates (Y = z, Z = -y)."""
+    return {"X": str(pos.x), "Y": str(pos.z), "Z": str(-pos.y)}
+
+def load_xml(path):
+    try:
+        return ET.parse(path).getroot()
+    except (ET.ParseError, OSError) as err:
+        raise ModelError(f"Could not read '{os.path.basename(path)}': {err}")
+
+def section(root, name):
+    sec = root.find(name)
+    return list(sec) if sec is not None else []
+
+def get_collection(parent, name):
+    col = bpy.data.collections.get(name) or bpy.data.collections.new(name)
+    if col.name not in parent.children:
+        parent.children.link(col)
+    return col
+
+def clear_collection(col):
+    for obj in list(col.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+def target_collection(context, model_name, sub=None, replace=False):
+    """Model / <model_name> / <sub>_<model_name>   (created on demand)."""
+    col = get_collection(get_collection(context.scene.collection, ROOT_COLLECTION), model_name)
+    if sub:
+        col = get_collection(col, f"{sub}_{model_name}")
+        if replace:
+            clear_collection(col)
+    return col
+
+def make_mesh_object(name, coords, edges=(), faces=()):
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(coords, edges, faces)
+    mesh.update()
+    mesh.validate()
+    return bpy.data.objects.new(name, mesh)
+
+def focus(context, obj):
+    try:
+        for other in context.selected_objects:
+            other.select_set(False)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+    except RuntimeError:      # object lives in a hidden collection
+        pass
+
+def vertex_group_indices(obj, name):
+    """Indices of every vertex that belongs to the vertex group `name`."""
+    if not obj or obj.type != 'MESH' or not name or name == "None":
+        return set()
+    vg = obj.vertex_groups.get(name)
+    if not vg:
+        return set()
+    return {v.index for v in obj.data.vertices if any(g.group == vg.index for g in v.groups)}
+
+def require_nodes(names):
+    missing = [n for n in dict.fromkeys(names) if n not in bpy.data.objects]
+    if missing:
+        raise ModelError(f"Missing required child nodes: {', '.join(missing)}")
+
+
+
+# ----------------------------------------------------------------------------- #
+#  Linear Combination Coefficients
+# ----------------------------------------------------------------------------- #
 
 def tetrahedron_volume(p1, p2, p3, p4):
     u, v, w = p2 - p1, p3 - p1, p4 - p1
     return (u.x * (v.y * w.z - v.z * w.y) - u.y * (v.x * w.z - v.z * w.x) + u.z * (v.x * w.y - v.y * w.x)) / 6.0
 
-def calculate_normalized_lcc(macro_pos, p1, p2, p3, p4):
-    V = tetrahedron_volume(p1, p2, p3, p4)
-    if V == 0: return [0.25, 0.25, 0.25, 0.25]
+def calculate_normalized_lcc(pos, p1, p2, p3, p4):
+    volume = tetrahedron_volume(p1, p2, p3, p4)
+    if abs(volume) < 1e-12:
+        return [0.25, 0.25, 0.25, 0.25]
     lcc = [
-        tetrahedron_volume(macro_pos, p2, p3, p4) / V,
-        tetrahedron_volume(p1, macro_pos, p3, p4) / V,
-        tetrahedron_volume(p1, p2, macro_pos, p4) / V,
-        tetrahedron_volume(p1, p2, p3, macro_pos) / V
+        tetrahedron_volume(pos, p2, p3, p4) / volume,
+        tetrahedron_volume(p1, pos, p3, p4) / volume,
+        tetrahedron_volume(p1, p2, pos, p4) / volume,
+        tetrahedron_volume(p1, p2, p3, pos) / volume,
     ]
     total = sum(lcc)
-    return [v / total for v in lcc] if total != 0 else [0.25] * 4
+    return [c / total for c in lcc] if total != 0 else [0.25] * 4
 
-def get_cloth_indices(obj, group_name):
-    indices = set()
-    if not group_name or group_name == "None": return indices
-    vg = obj.vertex_groups.get(group_name)
-    if vg:
-        for v in obj.data.vertices:
-            if any(g.group == vg.index for g in v.groups):
-                indices.add(v.index)
-    return indices
+class ChildSet:
+    """Four child node objects + their world positions (the gizmo of a MacroNode)"""
 
-def get_child_nodes_dict(names, report):
-    positions = {}
-    missing = []
-    for name in names:
-        obj = bpy.data.objects.get(name)
-        if obj: positions[name] = obj.matrix_world.translation
-        else: missing.append(name)
-    if missing:
-        report({'ERROR'}, f"Missing required child nodes: {', '.join(missing)}")
+    def __init__(self, objects):
+        self.objects = list(objects)
+        self.names = [o.name for o in self.objects]
+        self.points = [o.matrix_world.translation.copy() for o in self.objects]
+
+    @classmethod
+    def from_names(cls, names):
+        return cls([bpy.data.objects[n] for n in names])
+
+    def lcc(self, pos):
+        return calculate_normalized_lcc(pos, *self.points)
+
+def custom_childset(st, report=None):
+    """The user defined ChildNodes, or None when disabled or incomplete."""
+    if not st.model_custom_childnode:
         return None
-    return positions
+    objs = [st.childnode_1_object, st.childnode_2_object, st.childnode_3_object, st.childnode_4_object]
+    if all(objs):
+        return ChildSet(objs)
+    if report:
+        report({'WARNING'}, "Custom ChildNodes enabled but missing object references. Using the standard ChildNodes.")
+    return None
 
-def get_body_gear_targets(z, p4_mid_z, p4_low_z, profiles, top_key, mid_key, low_key):
-    if z >= p4_mid_z:
-        return profiles[top_key]
-    elif p4_low_z <= z < p4_mid_z:
-        return profiles[mid_key]
+class BodyGear:
+    """Height based region picker, shared by the exporter and the binder."""
+
+    def __init__(self, st):
+        self.sets = {key: ChildSet.from_names(names) for key, names in BODY_PROFILES.items()}
+        self.chest_z = self.sets['STOMACH'].points[3].z      # NChest
+        self.stomach_z = self.sets['HIP'].points[3].z        # NStomach
+        self.choice = {'Top': st.model_body_top, 'Middle': st.model_body_middle, 'Bottom': st.model_body_bottom}
+
+    def region(self, z):
+        if z >= self.chest_z:
+            return 'Top'
+        return 'Middle' if z >= self.stomach_z else 'Bottom'
+
+    def children(self, region):
+        return self.sets[self.choice[region]]
+
+
+
+# ----------------------------------------------------------------------------- #
+#  What each model type exports
+# ----------------------------------------------------------------------------- #
+
+# children: tuple of node names | () for stand-alone models | None for body gear (picked by height)
+Slot = namedtuple("Slot", "obj children cloth macro attack ranged second", defaults=(False, False, False))
+
+
+def export_slots(st, active=None):
+    """Every (object, childnodes, vertex groups) combination the selected model type consists of."""
+    t = st.model_type_export
+    main = st.selected_object or active
+    cloth, macro = st.model_export_cloth_general_folder, st.macronode_vertex_group
+
+    if t == 'MODEL':
+        return [Slot(main, (), cloth, macro)]
+    if t == 'HEAD_GEAR':
+        return [Slot(main, NODE_SETS['HEAD'], cloth, macro)]
+    if t == 'BODY_GEAR':
+        return [Slot(main, None, cloth, macro)]
+    if t == 'RANGED':
+        slots = [Slot(main, NODE_SETS['RANGED'], cloth, macro)]
+        if st.model_include_attack_edges:
+            slots.append(Slot(st.model_attack_edges_object_1, NODE_SETS['RANGED'], "", macro, attack=True, ranged=True))
+        return slots
+    if t == 'FOOT_GEAR':
+        return [Slot(st.foot_object_1, NODE_SETS['FOOT_1'], st.model_export_cloth_foot1_folder, st.macronode_vertex_group_foot_1),
+                Slot(st.foot_object_2, NODE_SETS['FOOT_2'], st.model_export_cloth_foot2_folder, st.macronode_vertex_group_foot_2)]
+    if t == 'WEAPON':
+        slots = [Slot(st.weapon_object_1, NODE_SETS['WEAPON_1'], st.model_export_cloth_weapon1_folder, st.macronode_vertex_group_weapon_1),
+                 Slot(st.weapon_object_2, NODE_SETS['WEAPON_2'], st.model_export_cloth_weapon2_folder, st.macronode_vertex_group_weapon_2)]
+        if st.model_include_attack_edges:
+            slots += [Slot(st.model_attack_edges_object_1, NODE_SETS['WEAPON_1'], "", "", attack=True),
+                      Slot(st.model_attack_edges_object_2, NODE_SETS['WEAPON_2'], "", "", attack=True, second=True)]
+        return slots
+    return []
+
+def usable_slots(st, active=None):
+    return [s for s in export_slots(st, active) if s.obj and s.obj.type == 'MESH']
+
+def slot_node_names(slots):
+    names = []
+    for s in slots:
+        names += sum(BODY_PROFILES.values(), ()) if s.children is None else s.children
+    return names
+
+
+
+
+
+# ============================================================================ #
+#  XML import
+# ============================================================================ #
+
+class XMLModel:
+    """Model XML (+ optional Dependencies XML) with every node position resolved."""
+
+    def __init__(self, context):
+        scene = context.scene
+        st = scene.gymnast_tool_model_props
+        path = bpy.path.abspath(scene.gymnast_normal_xml) if scene.gymnast_normal_xml else ""
+        if not os.path.isfile(path):
+            raise ModelError("Model XML path is missing or invalid.")
+        self.root = load_xml(path)
+        self.name = os.path.splitext(os.path.basename(path))[0]
+
+        self.deps_root, self.deps = None, {}
+        dep_path = bpy.path.abspath(scene.gymnast_dependencies_xml) if scene.gymnast_dependencies_xml else ""
+        if st.model_use_dependencies and dep_path:
+            if not os.path.isfile(dep_path):
+                raise ModelError("Dependencies XML path is missing or invalid.")
+            self.deps_root = load_xml(dep_path)
+            self.deps = {n.tag: n for n in section(self.deps_root, 'Nodes')}
+        self.positions = {}
+
+    def section(self, name):
+        return section(self.root, name)
+
+    def lookup(self, name, local):
+        """Position (XML space) of a node: this XML -> dependencies -> object in the Blender scene."""
+        pos = local.get(name)
+        if pos:
+            return pos
+        dep = self.deps.get(name)
+        if dep is not None:
+            return xml_pos(dep)
+        obj = bpy.data.objects.get(name)
+        if obj:
+            t = obj.matrix_world.translation
+            return (t.x, t.z, -t.y)
+        return None
+
+    def resolve(self, apply_lcc):
+        """Fill self.positions = {node name: (x, y, z)} in file order."""
+        nodes = self.section('Nodes')
+        if not nodes:
+            raise ModelError("No <Nodes> section found in XML")
+        local, macros = {}, []
+        for n in nodes:
+            ntype = n.get('Type')
+            if ntype == 'MacroNode' and apply_lcc:
+                macros.append(n)
+            elif ntype in ('Node', 'CenterOfMass', 'MacroNode') or all(n.get(k) for k in 'XYZ'):
+                local[n.tag] = xml_pos(n)
+        for n in macros:                       # Position = sum(LCC_i * child_i)
+            acc = [0.0, 0.0, 0.0]
+            for i in range(1, 5):
+                child, lcc = n.get(f'ChildNode{i}'), n.get(f'LCC{i}')
+                if not child or child == "Null" or not lcc:
+                    continue
+                p = self.lookup(child, local)
+                if p is None:
+                    continue
+                w = safe_float(lcc)
+                acc = [acc[0] + p[0] * w, acc[1] + p[1] * w, acc[2] + p[2] * w]
+            local[n.tag] = tuple(acc)
+        self.positions = {n.tag: local[n.tag] for n in nodes if n.tag in local}
+        return self
+
+class VertexTable:
+    """Vertex list for an imported mesh. Nodes that only exist in the dependencies are added on demand."""
+
+    def __init__(self, model):
+        self.model = model
+        self.names = list(model.positions)
+        self.index = {n: i for i, n in enumerate(self.names)}
+        self.coords = [xml_to_blender(*p) for p in model.positions.values()]
+
+    def has(self, name):
+        return name in self.index or name in self.model.deps
+
+    def require(self, name):
+        i = self.index.get(name)
+        if i is None and name in self.model.deps:
+            i = len(self.names)
+            self.names.append(name)
+            self.index[name] = i
+            self.coords.append(xml_to_blender(*xml_pos(self.model.deps[name])))
+        return i
+
+def add_import_groups(obj, model, table, rules, include_cloth):
+    """Vertex groups from the macro rules (child node sets) and from cloth nodes."""
+    parsed = [({n.strip() for n in r.names.split(",") if n.strip()}, r.group.strip()) for r in rules]
+    parsed = [(names, grp) for names, grp in parsed if names and grp]
+    groups = {}
+    for n in model.section('Nodes'):
+        i = table.index.get(n.tag)
+        if i is None:
+            continue
+        ntype = n.get('Type')
+        if ntype == 'MacroNode' and parsed:
+            kids = {n.get(f'ChildNode{k}') for k in range(1, 5)} - {None, "Null"}
+            for names, grp in parsed:
+                if names <= kids:
+                    groups.setdefault(grp, []).append(i)
+        elif include_cloth and ntype == 'Node' and n.get('Cloth') == '1':
+            groups.setdefault("Cloth", []).append(i)
+    for grp, indices in groups.items():
+        obj.vertex_groups.new(name=grp).add(indices, 1.0, 'REPLACE')
+
+
+
+
+
+# ----------------------------------------------------------------------------- #
+#  Capsule geometry node group
+# ----------------------------------------------------------------------------- #
+
+def add_node(tree, idname, loc, **props):
+    node = tree.nodes.new(idname)
+    node.location = loc
+    for key, value in props.items():
+        setattr(node, key, value)
+    return node
+
+def out(node, name):
+    """Output socket by name (skips the hidden duplicates some nodes carry)"""
+    return next((s for s in node.outputs if s.name == name and s.enabled), node.outputs[name])
+
+def socket_ids(group):
+    return {it.name: it.identifier for it in group.interface.items_tree if getattr(it, "in_out", None) == 'INPUT'}
+
+def _gn_inputs(mod):
+    props = getattr(mod, "properties", None)
+    return getattr(props, "inputs", None)
+
+def set_input(mod, ident, value):
+    inputs = _gn_inputs(mod)
+    if inputs is not None:
+        getattr(inputs, ident).value = value
     else:
-        return profiles[low_key]
+        mod[ident] = value
+
+def get_input(mod, ident):
+    inputs = _gn_inputs(mod)
+    if inputs is None:
+        return mod[ident]
+    try:
+        return getattr(inputs, ident).value
+    except AttributeError:
+        raise KeyError(ident)
+
+def ensure_capsule_group():
+    existing = bpy.data.node_groups.get(CAPSULE_GROUP)
+    if existing and existing.bl_idname == 'GeometryNodeTree':
+        return existing
+
+    ng = bpy.data.node_groups.new(CAPSULE_GROUP, 'GeometryNodeTree')
+    ng.is_modifier = True
+    ng.use_fake_user = True
+    nodes, links, iface = ng.nodes, ng.links, ng.interface
+
+    def add_input(name, socket_type, default=None, subtype=None, min_val=None, max_val=None):
+        sock = iface.new_socket(name=name, in_out='INPUT', socket_type=socket_type)
+        if socket_type == 'NodeSocketFloat':
+            if default is not None: sock.default_value = default
+            if subtype: sock.subtype = subtype
+            if min_val is not None: sock.min_value = min_val
+            if max_val is not None: sock.max_value = max_val
+
+    gi = add_node(ng, "NodeGroupInput", (0, 0))
+    add_input("End1", "NodeSocketObject")
+    add_input("End2", "NodeSocketObject")
+    add_input("Margin1", "NodeSocketFloat", 0.0, 'FACTOR', 0.0, 1.0)
+    add_input("Margin2", "NodeSocketFloat", 1.0, 'FACTOR', 0.0, 1.0)
+    add_input("Radius", "NodeSocketFloat", 0.0, 'DISTANCE', 0.0)
+    add_input("Edge", "NodeSocketString")
+    gi2 = add_node(ng, gi.bl_idname, (-190, -500))
+    go = add_node(ng, "NodeGroupOutput", (1750, 0))
+    iface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
+
+    info1 = add_node(ng, "GeometryNodeObjectInfo", (200, 0))
+    info2 = add_node(ng, "GeometryNodeObjectInfo", (200, -220))
+    info1.inputs["As Instance"].default_value = False
+    info2.inputs["As Instance"].default_value = False
+    inv_margin = add_node(ng, "ShaderNodeMath", (450, -220), operation='SUBTRACT', use_clamp=True)
+    inv_margin.inputs[0].default_value = 1
+    line = add_node(ng, "GeometryNodeCurvePrimitiveLine", (450, 0))
+    trim = add_node(ng, "GeometryNodeTrimCurve", (650, 0))
+    circle = add_node(ng, "GeometryNodeCurvePrimitiveCircle", (800, 0))
+    circle.inputs["Resolution"].default_value = 16
+    to_mesh = add_node(ng, "GeometryNodeCurveToMesh", (1000, 0))
+    to_mesh.inputs["Fill Caps"].default_value = False
+    store_body = add_node(ng, "GeometryNodeStoreNamedAttribute", (1250, 0), data_type='FLOAT_VECTOR', domain='POINT')
+    store_body.inputs["Name"].default_value = "nor"
+    normal_body = add_node(ng, "GeometryNodeInputNormal", (1000, -200))
+
+    sphere = add_node(ng, "GeometryNodeMeshUVSphere", (0, -500))
+    sphere.inputs["Segments"].default_value = 16
+    sphere.inputs["Rings"].default_value = 8
+    store_cap = add_node(ng, "GeometryNodeStoreNamedAttribute", (200, -500), data_type='FLOAT_VECTOR', domain='POINT')
+    store_cap.inputs["Name"].default_value = "nor"
+    normal_cap = add_node(ng, "GeometryNodeInputNormal", (0, -680))
+    delete = add_node(ng, "GeometryNodeDeleteGeometry", (450, -500), domain='FACE', mode='ALL')
+    position = add_node(ng, "GeometryNodeInputPosition", (0, -800))
+    separate = add_node(ng, "ShaderNodeSeparateXYZ", (180, -800))
+    compare = add_node(ng, "FunctionNodeCompare", (350, -800), data_type='FLOAT', operation='LESS_THAN')
+    smooth = add_node(ng, "GeometryNodeSetShadeSmooth", (710, -500))
+    end_cap = add_node(ng, "GeometryNodeCurveEndpointSelection", (880, -500))
+    instance = add_node(ng, "GeometryNodeInstanceOnPoints", (1100, -500))
+    store_inst = add_node(ng, "GeometryNodeStoreNamedAttribute", (1350, -500), data_type='FLOAT_VECTOR', domain='INSTANCE')
+    store_inst.inputs["Name"].default_value = "inst_rot"
+    inst_rot = add_node(ng, "GeometryNodeInputInstanceRotation", (1350, -780))
+    euler = add_node(ng, "FunctionNodeEulerToRotation", (1020, -300))
+    tangent = add_node(ng, "GeometryNodeInputTangent", (0, -1500))
+    end_align = add_node(ng, "GeometryNodeCurveEndpointSelection", (200, -1400))
+    end_align.inputs["End Size"].default_value = 0
+    flip = add_node(ng, "ShaderNodeVectorMath", (200, -1650), operation='SCALE')
+    flip.inputs["Scale"].default_value = -1
+    switch = add_node(ng, "GeometryNodeSwitch", (420, -1500), input_type='VECTOR')
+    align1 = add_node(ng, "FunctionNodeAlignRotationToVector", (630, -1500), axis='Z', pivot_axis='AUTO')
+    align2 = add_node(ng, "FunctionNodeAlignRotationToVector", (820, -1500), axis='X', pivot_axis='AUTO')
+    normal_align = add_node(ng, "GeometryNodeInputNormal", (420, -1800))
+    join = add_node(ng, "GeometryNodeJoinGeometry", (1500, 0))
+
+    wiring = [
+        (gi, "End1", info1, 0), (gi, "End2", info2, 0),
+        (info1, "Location", line, "Start"), (info2, "Location", line, "End"),
+        (line, "Curve", trim, "Curve"), (gi, "Margin1", trim, "Start"),
+        (gi, "Margin2", inv_margin, 1), (inv_margin, "Value", trim, "End"),
+        (trim, "Curve", to_mesh, "Curve"), (gi, "Radius", circle, "Radius"),
+        (circle, "Curve", to_mesh, "Profile Curve"), (to_mesh, "Mesh", store_body, "Geometry"),
+        (normal_body, "Normal", store_body, "Value"), (store_body, "Geometry", join, "Geometry"),
+        (gi2, "Radius", sphere, "Radius"), (sphere, "Mesh", store_cap, "Geometry"),
+        (normal_cap, "Normal", store_cap, "Value"), (store_cap, "Geometry", delete, "Geometry"),
+        (position, "Position", separate, "Vector"), (separate, "Z", compare, "A"),
+        (compare, "Result", delete, "Selection"), (delete, "Geometry", smooth, "Geometry"),
+        (smooth, "Geometry", instance, "Instance"), (end_cap, "Selection", instance, "Selection"),
+        (trim, "Curve", instance, "Points"), (euler, "Rotation", instance, "Rotation"),
+        (align2, "Rotation", euler, "Euler"), (instance, "Instances", store_inst, "Geometry"),
+        (inst_rot, "Rotation", store_inst, "Value"), (store_inst, "Geometry", join, "Geometry"),
+        (tangent, "Tangent", flip, "Vector"), (tangent, "Tangent", switch, "False"),
+        (flip, "Vector", switch, "True"), (end_align, "Selection", switch, "Switch"),
+        (switch, "Output", align1, "Vector"), (align1, "Rotation", align2, "Rotation"),
+        (normal_align, "Normal", align2, "Vector"), (join, "Geometry", go, "Geometry"),
+    ]
+    for src, src_name, dst, dst_name in wiring:
+        links.new(out(src, src_name), dst.inputs[dst_name])
+    return ng
 
 
-# ----------------- Transform -----------------
-
-def translate_origin_to_target(obj, target_loc):
-    delta = target_loc - obj.location
-    if obj.type == 'MESH':
-        mesh = obj.data
-        for vert in mesh.vertices: vert.co -= delta
-        mesh.update()
-    obj.location += delta
-
-def align_object_to_basis(obj, origin_loc, target_z, target_y):
-    z_dir = (target_z.location - origin_loc).normalized()
-    y_dir = (target_y.location - origin_loc).normalized()
-    x_dir = y_dir.cross(z_dir).normalized()
-    y_dir = z_dir.cross(x_dir).normalized()
-
-    rot_matrix = mathutils.Matrix((x_dir, y_dir, z_dir)).transposed()
-    new_quat = rot_matrix.to_quaternion()
-    old_quat = obj.rotation_quaternion.copy()
-    delta_quat = new_quat @ old_quat.inverted()
-
-    obj.rotation_mode = 'QUATERNION'
-    obj.rotation_quaternion = new_quat
-
-    if obj.type == 'MESH' and obj.data:
-        for vert in obj.data.vertices: vert.co.rotate(delta_quat.inverted())
-        obj.data.update()
-
-def setup_tracking_constraints(obj, loc_target, target_z, target_y, target_x=None, track_x_axis='TRACK_X', use_offset=False):
-    obj.constraints.clear()
-    copy_loc = obj.constraints.new(type='COPY_LOCATION')
-    copy_loc.target = loc_target
-    copy_loc.use_offset = use_offset
-    
-    dz = obj.constraints.new(type='DAMPED_TRACK')
-    dz.target = target_z; dz.track_axis = 'TRACK_Z'
-
-    dy = obj.constraints.new(type='DAMPED_TRACK')
-    dy.target = target_y; dy.track_axis = 'TRACK_Y'
-
-    if target_x:
-        dx = obj.constraints.new(type='DAMPED_TRACK')
-        dx.target = target_x; dx.track_axis = track_x_axis
-
-# ----------------- XML Export -----------------
-
-def write_macronode(element, name, pos, mass, is_fixed, p_nodes, child_names):
-    lcc = calculate_normalized_lcc(pos, *p_nodes)
-    ET.SubElement(element, name, Type="MacroNode",
-        X=str(pos.x), Y=str(pos.z), Z=str(-pos.y), Mass=str(mass), Fixed="1" if is_fixed else "0",
-        Visible="1", NodesCount="4",
-        ChildNode1=child_names[0], ChildNode2=child_names[1], ChildNode3=child_names[2], ChildNode4=child_names[3],
-        LCC1=str(lcc[0]), LCC2=str(lcc[1]), LCC3=str(lcc[2]), LCC4=str(lcc[3])
-    )
-
-def write_clothnode(element, name, pos, mass, attenuation):
-    ET.SubElement(element, name, Type="Node",
-        X=str(pos.x), Y=str(pos.z), Z=str(-pos.y), Mass=str(mass), Fixed="0", PinFixed="0",
-        Visible="1", Collisible="0", Passive="0", Cloth="1", Attenuation=f"{attenuation:.2f}", Rank="0"
-    )
-
-def process_object_nodes(obj, vertices, nodes_element, start_node, prefix, settings, cloth_indices, p_nodes, child_names, macro_indices=None, custom_p_nodes=None, custom_child_names=None):
-    if macro_indices is None: macro_indices = set()
-    for i, vertex in enumerate(vertices, start=start_node):
-        node_name = f"{prefix}Node-{i}"
-        pos = obj.matrix_world @ vertex.co
-        if vertex.index in cloth_indices:
-            write_clothnode(nodes_element, node_name, pos, settings.model_export_cloth_mass, settings.model_export_cloth_attenuation)
-        elif vertex.index in macro_indices and custom_p_nodes and custom_child_names:
-            write_macronode(nodes_element, node_name, pos, settings.model_node_mass, settings.model_node_fixed, custom_p_nodes, custom_child_names)
-        else:
-            write_macronode(nodes_element, node_name, pos, settings.model_node_mass, settings.model_node_fixed, p_nodes, child_names)
-    return start_node + len(vertices)
-
-def store_edge(context, edges, vertices, model_type, edges_element, starting_edge, starting_node, node_name_map=None):
-    settings = context.scene.gymnast_tool_model_props
-    prefix = settings.model_string_name
-    for i, edge in enumerate(edges, start=starting_edge):
-        v1, v2 = edge.vertices
-        node1, node2 = None, None
-        
-        if model_type in {"HEAD_GEAR", "WEAPON", "BODY_GEAR", "FOOT_GEAR", "RANGED"}:
-            node1 = f"{prefix}Node-{v1 + starting_node}"
-            node2 = f"{prefix}Node-{v2 + starting_node}"
-        elif model_type == "MODEL":
-            node1 = node_name_map.get(v1) if settings.model_use_pivot else f"{prefix}Node-{v1 + starting_node}"
-            node2 = node_name_map.get(v2) if settings.model_use_pivot else f"{prefix}Node-{v2 + starting_node}"
-            
-        if not node1 or not node2: continue
-        
-        length = math.dist(vertices[v1].co, vertices[v2].co)
-        ET.SubElement(edges_element, f"{prefix}Edge-{i}", Type="Edge", Length=str(length), WithSign="0", Fixed="0", Visible="1",
-                      Collisible="1" if settings.model_edge_collisible else "0", SubNodesCount="0", End1=node1, End2=node2)
-
-def store_face(context, faces, vertices, model_type, figures_element, starting_tri, starting_node, node_name_map=None):
-    settings = context.scene.gymnast_tool_model_props
-    prefix = settings.model_string_name
-    for i, face in enumerate(faces, start=starting_tri):
-        if len(face.vertices) == 3:
-            v1, v2, v3 = face.vertices
-            n1, n2, n3 = None, None, None
-            
-            if model_type in {"HEAD_GEAR", "WEAPON", "BODY_GEAR", "FOOT_GEAR", "RANGED"}:
-                n1, n2, n3 = f"{prefix}Node-{v1+starting_node}", f"{prefix}Node-{v2+starting_node}", f"{prefix}Node-{v3+starting_node}"
-            elif model_type == "MODEL":
-                if settings.model_use_pivot:
-                    n1, n2, n3 = node_name_map.get(v1), node_name_map.get(v2), node_name_map.get(v3)
-                else:
-                    n1, n2, n3 = f"{prefix}Node-{v1+starting_node}", f"{prefix}Node-{v2+starting_node}", f"{prefix}Node-{v3+starting_node}"
-            
-            if not n1 or not n2 or not n3: continue
-            ET.SubElement(figures_element, f"{prefix}Triangle-{i}", Type="Triangle", Node1=n1, Node2=n2, Node3=n3)
-
-def store_edge_attack(context, edges, vertices, edges_element, starting_edge, starting_node, is_first, is_ranged=False):
-    settings = context.scene.gymnast_tool_model_props
-    prefix = settings.model_string_name
-    for i, edge in enumerate(edges, start=1):
-        v1, v2 = edge.vertices
-        n1, n2 = f"{prefix}Node-{v1 + starting_node}", f"{prefix}Node-{v2 + starting_node}"
-        length = math.dist(vertices[v1].co, vertices[v2].co)
-        
-        name = f"{prefix}AttackEdge-{i}" if is_ranged else (f"{prefix}AttackEdge-{i}_1" if is_first else f"{prefix}AttackEdge-{i}_2")
-        ET.SubElement(edges_element, name, Type="Edge", Length=str(length), WithSign="0", Fixed="0", Visible="1",
-                      Collisible="1" if settings.model_edge_collisible else "0", SubNodesCount="0", End1=n1, End2=n2)
 
 
-# #################### #
-# Operators
-# #################### #
 
+# ----------------------------------------------------------------------------- #
+#  Operators base class
+# ----------------------------------------------------------------------------- #
 
-class ConvertXMLOperator(bpy.types.Operator):
-    bl_idname = "model.convert_xml"
-    bl_label = "Convert XML to OBJ"
-    bl_description = "Convert the Model XML into a Blender object"
+class GymnastOperator(bpy.types.Operator):
+    """Subclasses implement run(); a ModelError becomes a normal Blender error message."""
     bl_options = {'REGISTER', 'UNDO'}
-    
+
+    def run(self, context):
+        raise NotImplementedError
+
     def execute(self, context):
-        props = context.scene.gymnast_tool_model_props
-        dependencies_path = bpy.path.abspath(context.scene.gymnast_dependencies_xml) if context.scene.gymnast_dependencies_xml else None
-        model_path = bpy.path.abspath(context.scene.gymnast_normal_xml) if context.scene.gymnast_normal_xml else None
-        
-        if not model_path or not os.path.exists(model_path):
-            self.report({'ERROR'}, "Model XML path is missing or invalid.")
-            return {'CANCELLED'}
-            
-        if props.model_use_dependencies and dependencies_path and not os.path.exists(dependencies_path):
-            self.report({'ERROR'}, "Dependencies XML path is missing or invalid.")
-            return {'CANCELLED'}
-        
-        # Setup Collections
-        model_collection = bpy.data.collections.get("Model") or bpy.data.collections.new("Model")
-        if model_collection.name not in context.scene.collection.children: 
-            context.scene.collection.children.link(model_collection)
-
-        model_name = os.path.basename(model_path).split('.')[0]
-        child_collection = bpy.data.collections.get(model_name) or bpy.data.collections.new(model_name)
-        if child_collection.name not in model_collection.children: 
-            model_collection.children.link(child_collection)
-
-        temp_obj_path = os.path.join(bpy.path.abspath("//"), f"{model_name}.obj")
-
-        # Parse XMLs Once
-        tree = ET.parse(model_path)
-        root = tree.getroot()
-        
-        dep_nodes_dict = {}
-        if props.model_use_dependencies and dependencies_path:
-            dep_tree = ET.parse(dependencies_path)
-            for d_node in dep_tree.getroot().find('Nodes') or []:
-                dep_nodes_dict[d_node.tag] = d_node
-
-        nodes = {} # Stores calculated (x, y, z)
-        node_index_map = {}
-        vertex_counter = 1
-
         try:
-            with open(temp_obj_path, 'w') as obj_file:
-                obj_file.write("# Temporary OBJ file generated by Blender Addon\n")
-                nodes_section = root.find('Nodes')
-                
-                if nodes_section is not None:
-                    macro_nodes = []
-                    
-                    # First Pass: Nodes and Centerofmass
-                    for node in nodes_section:
-                        ntype = node.get('Type')
-                        if ntype in ['Node', 'CenterOfMass'] or (ntype == 'MacroNode' and not props.calculate_macronode):
-                            x, y, z = safe_float(node.get('X')), safe_float(node.get('Y')), safe_float(node.get('Z'))
-                            nodes[node.tag] = (x, y, z)
-                            node_index_map[node.tag] = vertex_counter
-                            obj_file.write(f"v {x} {-z} {y}\n")
-                            vertex_counter += 1
-                        elif ntype == 'MacroNode' and props.calculate_macronode:
-                            macro_nodes.append(node)
-                            
-                    # Second Pass: MacroNodes Calculation
-                    if props.calculate_macronode:
-                        for node in macro_nodes:
-                            lcc_pos = [0.0, 0.0, 0.0]
-                            for i in range(1, 5):
-                                child_name = node.get(f'ChildNode{i}')
-                                lcc_val = node.get(f'LCC{i}')
-                                
-                                if not child_name or child_name == "Null" or not lcc_val: continue
-                                lcc = safe_float(lcc_val)
+            return self.run(context) or {'FINISHED'}
+        except ModelError as err:
+            self.report({'ERROR'}, str(err))
+            return {'CANCELLED'}
 
-                                if child_name in nodes:
-                                    cx, cy, cz = nodes[child_name]
-                                elif child_name in dep_nodes_dict:
-                                    d_node = dep_nodes_dict[child_name]
-                                    cx, cy, cz = safe_float(d_node.get('X')), safe_float(d_node.get('Y')), safe_float(d_node.get('Z'))
-                                else:
-                                    b_obj = bpy.data.objects.get(child_name)
-                                    if b_obj:
-                                        cx, cz, cy = b_obj.location
-                                        cy = -cy
-                                    else: continue
-                                    
-                                lcc_pos[0] += cx * lcc; lcc_pos[1] += cy * lcc; lcc_pos[2] += cz * lcc
-                                
-                            nodes[node.tag] = tuple(lcc_pos)
-                            node_index_map[node.tag] = vertex_counter
-                            obj_file.write(f"v {lcc_pos[0]} {-lcc_pos[2]} {lcc_pos[1]}\n")
-                            vertex_counter += 1
 
-                # Write Figures/Faces
-                figures_section = root.find('Figures')
-                if figures_section is not None:
-                    obj_file.write("\n# Faces\n")
-                    for figure in figures_section:
-                        if figure.get('Type') == 'Triangle':
-                            n1, n2, n3 = figure.get('Node1'), figure.get('Node2'), figure.get('Node3')
-                            
-                            # Dependencies triangle fallback
-                            if props.model_use_dependencies:
-                                for n in (n1, n2, n3):
-                                    if n not in nodes and n in dep_nodes_dict:
-                                        d_node = dep_nodes_dict[n]
-                                        x, y, z = safe_float(d_node.get('X')), safe_float(d_node.get('Y')), safe_float(d_node.get('Z'))
-                                        nodes[n] = (x, y, z)
-                                        node_index_map[n] = vertex_counter
-                                        obj_file.write(f"v {x} {-z} {y}\n")
-                                        vertex_counter += 1
 
-                            if n1 in nodes and n2 in nodes and n3 in nodes:
-                                obj_file.write(f"f {node_index_map[n1]} {node_index_map[n2]} {node_index_map[n3]}\n")
 
-            # Import the OBJ file into Blender
-            bpy.ops.wm.obj_import(filepath=temp_obj_path)
-            imported_obj = context.selected_objects[0]
-            imported_obj.name = f"OBJ_{model_name}"
-            imported_obj.rotation_euler = (0, 0, 0)
-            bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
-            # Move to Triangle collection
-            triangle_col = bpy.data.collections.get(f"Triangle_{model_name}") or bpy.data.collections.new(f"Triangle_{model_name}")
-            if triangle_col.name not in child_collection.children:
-                child_collection.children.link(triangle_col)
-                
-            for col in imported_obj.users_collection: col.objects.unlink(imported_obj)
-            triangle_col.objects.link(imported_obj)
-            
-            # --- Vertex Groups ---
-            if props.add_vertex_group:
-                mesh = imported_obj.data
-                world_matrix = imported_obj.matrix_world
-                
-                # Create spatial lookup dictionary
-                vert_lut = {(round((world_matrix @ v.co).x, 4), round((world_matrix @ v.co).y, 4), round((world_matrix @ v.co).z, 4)): v.index for v in mesh.vertices}
-                
-                # Macro Node Rules
-                macro_rules = [{"names": set(name.strip() for name in item.names.split(",") if name.strip()), "group": item.group} for item in context.scene.macro_rules]
-                
-                if macro_rules and nodes_section is not None:
-                    for node in nodes_section:
-                        if node.get('Type') != 'MacroNode': continue
-                        
-                        child_nodes = [node.get(f"ChildNode{i}") for i in range(1, 5) if node.get(f"ChildNode{i}") and node.get(f"ChildNode{i}") != "Null"]
-                        if not child_nodes: continue
-                        
-                        child_set = set(child_nodes)
-                        for rule in macro_rules:
-                            if rule["names"].issubset(child_set):
-                                vg_name = rule["group"]
-                                vg = imported_obj.vertex_groups.get(vg_name) or imported_obj.vertex_groups.new(name=vg_name)
+# ----------------------------------------------------------------------------- #
+#  Import operators
+# ----------------------------------------------------------------------------- #
 
-                                # Fetch the target position directly from dictionary
-                                if node.tag in nodes:
-                                    nx, ny, nz = nodes[node.tag]
-                                    target_pos = Vector((nx, -nz, ny))
-                                    key = (round(target_pos.x, 4), round(target_pos.y, 4), round(target_pos.z, 4))
-                                    
-                                    # Fast dict lookup
-                                    if key in vert_lut:
-                                        vg.add([vert_lut[key]], 1.0, 'REPLACE')
-                                    else: # Safe fallback
-                                        for v in mesh.vertices:
-                                            if ((world_matrix @ v.co) - target_pos).length < 0.01:
-                                                vg.add([v.index], 1.0, 'REPLACE')
-                                                break
+class ImportMeshOperator(GymnastOperator):
+    bl_idname = "model.convert_xml"
+    bl_label = "Import Mesh (Triangles)"
+    bl_description = "Build one mesh object from the Triangle figures of the Model XML"
 
-                # Cloth Nodes
-                if props.add_vertex_group_include_cloth and nodes_section is not None:
-                    cloth_verts = []
-                    for node in nodes_section:
-                        if node.get('Type') == 'Node' and node.get('Cloth') == '1' and node.tag in nodes:
-                            nx, ny, nz = nodes[node.tag]
-                            target_pos = Vector((nx, -nz, ny))
-                            key = (round(target_pos.x, 4), round(target_pos.y, 4), round(target_pos.z, 4))
-                            
-                            if key in vert_lut:
-                                cloth_verts.append(vert_lut[key])
-                            else:
-                                for v in mesh.vertices:
-                                    if ((world_matrix @ v.co) - target_pos).length < 0.01:
-                                        cloth_verts.append(v.index)
-                                        break
-                                        
-                    if cloth_verts:
-                        vgroup = imported_obj.vertex_groups.get("Cloth") or imported_obj.vertex_groups.new(name="Cloth")
-                        vgroup.add(cloth_verts, 1.0, 'REPLACE')
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        model = XMLModel(context).resolve(st.calculate_macronode)
+        table = VertexTable(model)
+        faces = []
+        for fig in model.section('Figures'):
+            if fig.get('Type') != 'Triangle':
+                continue
+            names = [fig.get(k) for k in ("Node1", "Node2", "Node3")]
+            if all(table.has(n) for n in names):
+                faces.append(tuple(table.require(n) for n in names))
 
+        obj = make_mesh_object(f"OBJ_{model.name}", table.coords, faces=faces)
+        target_collection(context, model.name, "Triangle", st.import_replace_existing).objects.link(obj)
+        if st.add_vertex_group:
+            add_import_groups(obj, model, table, context.scene.macro_rules, st.add_vertex_group_include_cloth)
+        focus(context, obj)
+        self.report({'INFO'}, f"Imported {len(faces)} triangles ({len(table.names)} nodes)")
+
+
+class ImportNodesOperator(GymnastOperator):
+    bl_idname = "model.add_nodes"
+    bl_label = "Import Nodes"
+    bl_description = "Add every node of the Model XML to Blender."
+
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        model = XMLModel(context).resolve(st.calculate_macronode)
+        col = target_collection(context, model.name, "Nodes", st.import_replace_existing)
+
+        if st.import_node_as_vertex:
+            col.objects.link(make_mesh_object(f"Nodes_{model.name}", [xml_to_blender(*p) for p in model.positions.values()]))
+        else:
+            bm = bmesh.new()
+            bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, radius=1.0)
+            sphere_mesh = bpy.data.meshes.new("NodeSphereData")
+            bm.to_mesh(sphere_mesh)
+            bm.free()
+            size = st.import_node_size
+            for name, pos in model.positions.items():
+                sphere = bpy.data.objects.new(name, sphere_mesh)       # object name == node name
+                sphere.location = xml_to_blender(*pos)
+                sphere.scale = (size, size, size)
+                sphere.display.show_shadows = False
+                col.objects.link(sphere)
+        self.report({'INFO'}, f"Imported {len(model.positions)} nodes")
+
+
+class ImportEdgesOperator(GymnastOperator):
+    bl_idname = "model.add_edges"
+    bl_label = "Import Nodes and Edges"
+    bl_description = "Add the nodes and edges of the Model XML as one wire mesh"
+
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        model = XMLModel(context).resolve(st.calculate_macronode)
+        table = VertexTable(model)
+        edges = []
+        for e in model.section('Edges'):
+            a, b = e.get('End1'), e.get('End2')
+            if table.has(a) and table.has(b):
+                edges.append((table.require(a), table.require(b)))
+        obj = make_mesh_object(f"Edges_{model.name}", table.coords, edges=edges)
+        target_collection(context, model.name, "Edges", st.import_replace_existing).objects.link(obj)
+        self.report({'INFO'}, f"Imported {len(edges)} edges")
+
+
+class ImportCapsulesOperator(GymnastOperator):
+    bl_idname = "model.add_capsules"
+    bl_label = "Import Capsules"
+    bl_description = "Add the Capsule figures of the Model XML (their edge ends must exist as node objects)"
+
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        model = XMLModel(context)
+
+        def edge_ends(root):
+            return {e.tag: (e.get('End1'), e.get('End2')) for e in section(root, 'Edges')}
+
+        edges = edge_ends(model.deps_root) if model.deps_root is not None else {}
+        edges.update(edge_ends(model.root))
+
+        group = ensure_capsule_group()
+        ids = socket_ids(group)
+        if not {"End1", "End2", "Margin1", "Margin2", "Radius", "Edge"} <= set(ids):
+            raise ModelError(f"Node group '{CAPSULE_GROUP}' has missing sockets. Delete it and import again.")
+
+        col = target_collection(context, model.name, "Capsules", st.import_replace_existing)
+        base = bpy.data.meshes.new("CapsuleBaseMesh")     # needs one vertex or Geometry Nodes will not evaluate
+        base.from_pydata([(0.0, 0.0, 0.0)], [], [])
+        base.update()
+
+        made = skipped = 0
+        for fig in model.section('Figures'):
+            if fig.get('Type') != 'Capsule':
+                continue
+            edge_name = fig.get('Edge')
+            ends = edges.get(edge_name)
+            objs = [bpy.data.objects.get(n) for n in ends] if ends else None
+            if not objs or not all(objs):
+                skipped += 1
+                continue
+            obj = bpy.data.objects.new(fig.tag, base)
+            col.objects.link(obj)
+            mod = obj.modifiers.new(name="GeometryNodes", type='NODES')
+            mod.node_group = group
+            set_input(mod, ids["End1"], objs[0])
+            set_input(mod, ids["End2"], objs[1])
+            set_input(mod, ids["Margin1"], safe_float(fig.get("Margin1")))
+            set_input(mod, ids["Margin2"], safe_float(fig.get("Margin2")))
+            set_input(mod, ids["Radius"], safe_float(fig.get("Radius1"), 1.0))
+            set_input(mod, ids["Edge"], edge_name)
+            made += 1
+
+        context.view_layer.update()
+        note = f", skipped {skipped} (edge or node objects missing - import the Nodes first)" if skipped else ""
+        self.report({'INFO' if made or not skipped else 'WARNING'}, f"Imported {made} capsules{note}")
+
+
+class ImportAllOperator(GymnastOperator):
+    bl_idname = "model.import_all"
+    bl_label = "Import Everything"
+    bl_description = "Nodes, edges, triangles and capsules in one click"
+
+    def run(self, context):
+        for name in ("add_nodes", "add_edges", "convert_xml", "add_capsules"):
+            if getattr(bpy.ops.model, name)() != {'FINISHED'}:
+                return {'CANCELLED'}
+        self.report({'INFO'}, "Model imported")
+
+
+
+
+# ============================================================================ #
+#  XML export
+# ============================================================================ #
+
+def write_macronode(parent, name, pos, mass, fixed, children):
+    lcc = children.lcc(pos)
+    ET.SubElement(parent, name, Type="MacroNode", **xml_attribs(pos), Mass=str(mass), Fixed="1" if fixed else "0",
+                  Visible="1", NodesCount="4",
+                  ChildNode1=children.names[0], ChildNode2=children.names[1],
+                  ChildNode3=children.names[2], ChildNode4=children.names[3],
+                  LCC1=str(lcc[0]), LCC2=str(lcc[1]), LCC3=str(lcc[2]), LCC4=str(lcc[3]))
+
+
+def write_clothnode(parent, name, pos, mass, attenuation):
+    ET.SubElement(parent, name, Type="Node", **xml_attribs(pos), Mass=str(mass), Fixed="0", PinFixed="0",
+                  Visible="1", Collisible="0", Passive="0", Cloth="1", Attenuation=f"{attenuation:.2f}", Rank="0")
+
+
+def write_xml_file(root, filepath, compact):
+    if not filepath.lower().endswith(".xml"):
+        filepath += ".xml"
+    raw = ET.tostring(root, encoding="unicode")
+    text = '<?xml version="1.0" ?>\n' + raw if compact else minidom.parseString(raw).toprettyxml(indent="  ")
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(text)
+    return filepath
+
+
+class ModelExporter:
+    """Builds the <Scene> tree for the selected model type."""
+
+    def __init__(self, context, report):
+        self.context, self.report = context, report
+        self.st = st = context.scene.gymnast_tool_model_props
+        self.prefix = st.model_string_name
+        self.n0, self.e0, self.t0 = st.model_node_offset, st.model_edge_offset, st.model_tri_offset
+        self.root = ET.Element("Scene")
+        self.nodes_el = ET.SubElement(self.root, "Nodes")
+        self.edges_el = ET.SubElement(self.root, "Edges")
+        self.figs_el = ET.SubElement(self.root, "Figures")
+        self.custom = custom_childset(st, report)
+        self.body = None
+
+    # ---- main entry ------------------------------------------------------------
+    def build(self):
+        st = self.st
+        slots = usable_slots(st, self.context.active_object)
+        if not slots:
+            raise ModelError("Nothing to export: pick a mesh object for the selected model type.")
+        require_nodes(slot_node_names(slots))
+        if st.model_type_export == 'BODY_GEAR':
+            self.body = BodyGear(st)
+
+        for slot in slots:
+            self.export_slot(slot)
+        if st.model_type_export == 'BODY_GEAR' and st.model_include_necessary_tri_body:
+            for suffix, a, b, c in FOOT_TRIANGLES:
+                ET.SubElement(self.figs_el, f"{self.prefix}Foot-Triangle{suffix}", Type="Triangle", Shading="0",
+                              Node1=a, Node2=b, Node3=c)
+        if st.model_export_capsules and st.model_export_capsules_folder:
+            self.export_capsules()
+        self.check_names()
+        return self.root
+
+    # ---- one object ------------------------------------------------------------
+    def export_slot(self, slot):
+        st, o, t = self.st, slot.obj, self.st.model_type_export
+        mesh = o.to_mesh()
+        try:
+            bm = bmesh.new()
+            bm.from_mesh(mesh)
+            bmesh.ops.triangulate(bm, faces=bm.faces[:])
+            bm.to_mesh(mesh)
+            bm.free()
+            verts, edges, faces = mesh.vertices, mesh.edges, mesh.polygons
+
+            mw = o.matrix_world
+            world = [mw @ v.co for v in verts]
+            names = [f"{self.prefix}Node-{self.n0 + i}" for i in range(len(verts))]
+            cloth = vertex_group_indices(o, slot.cloth) if st.model_export_cloth and not slot.attack else set()
+            macro = vertex_group_indices(o, slot.macro) if self.custom else set()
+
+            if slot.attack:
+                self.write_attack_edges(slot, names, edges, world)
+                self.write_gear_nodes(slot, names, world, cloth, macro)
+            elif t == 'MODEL':
+                self.write_model_nodes(o, names, world, cloth, macro)
+                self.write_edges(names, edges, world)
+                self.write_faces(names, faces)
+            else:
+                if t != 'WEAPON' or st.model_edge_include:
+                    self.write_edges(names, edges, world)
+                    self.e0 += len(edges)
+                self.write_faces(names, faces)
+                self.t0 += len(faces)
+                self.write_gear_nodes(slot, names, world, cloth, macro)
+            self.n0 += len(verts)
         finally:
-            # cleanup the temp OBJ file even if it crashes
-            if os.path.exists(temp_obj_path):
-                os.remove(temp_obj_path)
+            o.to_mesh_clear()
 
-        self.report({'INFO'}, "Model conversion completed")
-        return {'FINISHED'}
+    # ---- nodes -----------------------------------------------------------------
+    def write_gear_nodes(self, slot, names, world, cloth, macro):
+        st = self.st
+        fixed_set = ChildSet.from_names(slot.children) if slot.children else None
+        for i, pos in enumerate(world):
+            if i in cloth:
+                write_clothnode(self.nodes_el, names[i], pos, st.model_export_cloth_mass, st.model_export_cloth_attenuation)
+                continue
+            if self.custom and i in macro:
+                children = self.custom
+            elif slot.children is None:
+                children = self.body.children(self.body.region(pos.z))
+            else:
+                children = fixed_set
+            write_macronode(self.nodes_el, names[i], pos, st.model_node_mass, st.model_node_fixed, children)
 
-class ExportModelToXML(bpy.types.Operator):
+    def write_plain_node(self, name, pos, is_cloth):
+        st = self.st
+        attribs = {"Type": "Node", **xml_attribs(pos),
+                   "Mass": str(st.model_export_cloth_mass if is_cloth else st.model_node_mass),
+                   "Fixed": "0" if is_cloth else ("1" if st.model_node_fixed else "0"),
+                   "PinFixed": "0", "Visible": "1", "Passive": "0", "Cloth": "1" if is_cloth else "0",
+                   "Collisible": "0" if is_cloth else ("1" if st.model_node_collisible else "0")}
+        if is_cloth:
+            attribs.update(Attenuation=f"{st.model_export_cloth_attenuation:.2f}", Rank="0")
+        ET.SubElement(self.nodes_el, name, **attribs)
+
+    def write_model_nodes(self, o, names, world, cloth, macro):
+        st = self.st
+        pivot = set()
+        if st.model_use_pivot:
+            if st.model_pivot_source == 'GROUP':
+                pivot = vertex_group_indices(o, st.model_pivot)
+                if len(pivot) > 1:
+                    raise ModelError(f"Pivot group '{st.model_pivot}' has {len(pivot)} vertices - a model has exactly one NPivot.")
+                if not pivot:
+                    self.report({'WARNING'}, "No NPivot defined. Models placed in the world need exactly one (see 'Set Pivot').")
+            for i in pivot:
+                names[i] = "NPivot"
+
+        for i, pos in enumerate(world):
+            if self.custom and i in macro and i not in cloth:
+                write_macronode(self.nodes_el, names[i], pos, st.model_node_mass, st.model_node_fixed, self.custom)
+            else:
+                self.write_plain_node(names[i], pos, i in cloth)
+
+        if st.model_use_pivot and st.model_pivot_source != 'GROUP':     # extra NPivot node, no vertex needed
+            where = o.matrix_world.translation if st.model_pivot_source == 'ORIGIN' else self.context.scene.cursor.location
+            self.write_plain_node("NPivot", where, False)
+
+    # ---- edges / triangles -------------------------------------------------------
+    def write_edges(self, names, edges, world):
+        coll = "1" if self.st.model_edge_collisible else "0"
+        for i, e in enumerate(edges, start=self.e0):
+            a, b = e.vertices
+            ET.SubElement(self.edges_el, f"{self.prefix}Edge-{i}", Type="Edge", Length=str(math.dist(world[a], world[b])),
+                          WithSign="0", Fixed="0", Visible="1", Collisible=coll, SubNodesCount="0",
+                          End1=names[a], End2=names[b])
+
+    def write_attack_edges(self, slot, names, edges, world):
+        coll = "1" if self.st.model_edge_collisible else "0"
+        suffix = "" if slot.ranged else ("_2" if slot.second else "_1")
+        for i, e in enumerate(edges, start=1):
+            a, b = e.vertices
+            ET.SubElement(self.edges_el, f"{self.prefix}AttackEdge-{i}{suffix}", Type="Edge",
+                          Length=str(math.dist(world[a], world[b])), WithSign="0", Fixed="0", Visible="1",
+                          Collisible=coll, SubNodesCount="0", End1=names[a], End2=names[b])
+
+    def write_faces(self, names, faces):
+        for i, f in enumerate(faces, start=self.t0):
+            if len(f.vertices) == 3:
+                a, b, c = f.vertices
+                ET.SubElement(self.figs_el, f"{self.prefix}Triangle-{i}", Type="Triangle",
+                              Node1=names[a], Node2=names[b], Node3=names[c])
+
+    # ---- capsules ----------------------------------------------------------------
+    def export_capsules(self):
+        st = self.st
+        for o in st.model_export_capsules_folder.all_objects:
+            mod = next((m for m in o.modifiers if m.type == 'NODES' and m.node_group), None) if o.type == 'MESH' else None
+            if not mod:
+                continue
+            ids = socket_ids(mod.node_group)
+            try:
+                e1, e2 = get_input(mod, ids["End1"]), get_input(mod, ids["End2"])
+                m1, m2 = get_input(mod, ids["Margin1"]), get_input(mod, ids["Margin2"])
+                rad = get_input(mod, ids["Radius"])
+            except KeyError:
+                continue
+            if not e1 or not e2:
+                continue
+
+            edge_val = None
+            if st.model_export_capsules_predefined:
+                edge_val = get_input(mod, ids["Edge"]) if "Edge" in ids else None
+            else:
+                for e in self.edges_el:
+                    if e.get('End1') == e1.name and e.get('End2') == e2.name:
+                        edge_val = e.tag
+                        break
+                    if e.get('End2') == e1.name and e.get('End1') == e2.name:
+                        edge_val, m1, m2 = e.tag, m2, m1
+                        break
+            if edge_val:
+                ET.SubElement(self.figs_el, o.name.replace(" ", "_"), Type="Capsule", Edge=edge_val,
+                              Radius1=f"{rad:.2f}", Radius2=f"{rad:.2f}", Margin1=str(m1), Margin2=str(m2))
+
+    # ---- sanity check --------------------------------------------------------------
+    def check_names(self):
+        """Names must be unique inside this XML and against the Dependencies XML (they are merged in-game)."""
+        tags = [e.tag for sec in (self.nodes_el, self.edges_el, self.figs_el) for e in sec]
+        dupes = sorted(t for t, c in Counter(tags).items() if c > 1)
+        scene = self.context.scene
+        dep_path = bpy.path.abspath(scene.gymnast_dependencies_xml) if scene.gymnast_dependencies_xml else ""
+        if self.st.model_use_dependencies and os.path.isfile(dep_path):
+            try:
+                root = load_xml(dep_path)
+                theirs = {e.tag for name in ("Nodes", "Edges", "Figures") for e in section(root, name)}
+                dupes += sorted((set(tags) & theirs) - {"NPivot"} - set(dupes))
+            except ModelError:
+                pass
+        if dupes:
+            shown = ", ".join(dupes[:6]) + (" ..." if len(dupes) > 6 else "")
+            self.report({'WARNING'}, f"Name conflict ({len(dupes)}): {shown}. Change the Prefix or the Start numbers.")
+
+
+class ExportModelOperator(GymnastOperator):
     bl_idname = "model.export_to_xml"
-    bl_label = "Export OBJ to XML"
-    bl_description = "Convert the selected Blender object into an XML file"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_label = "Export Model to XML"
+    bl_description = "Write the selected model type to a Model XML file"
     filename_ext = ".xml"
-    filepath: bpy.props.StringProperty(subtype="FILE_PATH")
+    filepath: StringProperty(subtype="FILE_PATH")
+    filter_glob: StringProperty(default="*.xml", options={'HIDDEN'})
 
-    def execute(self, context):
-        settings = context.scene.gymnast_tool_model_props
-        m_type = settings.model_type_export
-        obj = settings.selected_object
-        start_node, start_edge, start_tri = settings.model_node_offset, settings.model_edge_offset, settings.model_tri_offset
-        prefix = settings.model_string_name
-        
-        root = ET.Element("Scene")
-        nodes_elem, edges_elem, figs_elem = ET.SubElement(root, "Nodes"), ET.SubElement(root, "Edges"), ET.SubElement(root, "Figures")
-        
-        def process_mesh_export(o, expected_type, child_reqs, cloth_grp_name, is_weapon_or_foot=False, is_attack=False, is_ranged=False):
-            nonlocal start_node, start_edge, start_tri
-            if not o or o.type != 'MESH': return False
-            mesh, verts, edges, faces = get_triangulated_data(o)
-            cloth_idx = get_cloth_indices(o, cloth_grp_name) if settings.model_export_cloth else set()
-            
-            macro_idx = set()
-            custom_p_nodes = ()
-            custom_child_names = []
-            if settings.model_custom_childnode:
-                custom_objs = [settings.childnode_1_object, settings.childnode_2_object, settings.childnode_3_object, settings.childnode_4_object]
-                if all(custom_objs):
-                    custom_child_names = [obj.name for obj in custom_objs]
-                    custom_p_nodes = tuple(obj.matrix_world.translation for obj in custom_objs)
-                    
-                    if expected_type == "WEAPON":
-                        if o == settings.weapon_object_1:
-                            macro_idx = get_cloth_indices(o, settings.macronode_vertex_group_weapon_1)
-                        elif o == settings.weapon_object_2:
-                            macro_idx = get_cloth_indices(o, settings.macronode_vertex_group_weapon_2)
-                    else:
-                        macro_idx = get_cloth_indices(o, settings.macronode_vertex_group)
-                else:
-                    self.report({'WARNING'}, "Custom ChildNodes enabled but missing object references. Defaulting to standard behavior.")
-            
-            p_dict = get_child_nodes_dict(child_reqs, self.report) if child_reqs else {}
-            if p_dict is None and child_reqs: return False
-            p_nodes = tuple(p_dict[n] for n in child_reqs) if p_dict else ()
-
-            if is_attack:
-                store_edge_attack(context, edges, verts, edges_elem, start_edge, start_node, is_first=True, is_ranged=is_ranged)
-                start_node = process_object_nodes(o, verts, nodes_elem, start_node, prefix, settings, set(), p_nodes, child_reqs, macro_idx, custom_p_nodes, custom_child_names)
-            elif expected_type == "BODY_GEAR":
-                p_up = tuple(get_child_nodes_dict(["NChestS_1", "NChestF", "NChestS_2", "NNeck"], self.report).values())
-                p_mid = tuple(get_child_nodes_dict(["NStomachS_1", "NStomachF", "NStomachS_2", "NChest"], self.report).values())
-                p_low = tuple(get_child_nodes_dict(["NPelvisF", "NHip_1", "NHip_2", "NStomach"], self.report).values())
-                
-                profs = {
-                    'CHEST': (p_up, ["NChestS_1", "NChestF", "NChestS_2", "NNeck"]),
-                    'STOMACH': (p_mid, ["NStomachS_1", "NStomachF", "NStomachS_2", "NChest"]),
-                    'HIP': (p_low, ["NPelvisF", "NHip_1", "NHip_2", "NStomach"])
-                }
-                
-                store_edge(context, edges, verts, expected_type, edges_elem, start_edge, start_node)
-                store_face(context, faces, verts, expected_type, figs_elem, start_tri, start_node)
-                for i, v in enumerate(verts, start=start_node):
-                    pos = o.matrix_world @ v.co
-                    if v.index in cloth_idx:
-                        write_clothnode(nodes_elem, f"{prefix}Node-{i}", pos, settings.model_export_cloth_mass, settings.model_export_cloth_attenuation)
-                    elif v.index in macro_idx and custom_p_nodes and custom_child_names:
-                        write_macronode(nodes_elem, f"{prefix}Node-{i}", pos, settings.model_node_mass, settings.model_node_fixed, custom_p_nodes, custom_child_names)
-                    else:
-                        p_n, c_names = get_body_gear_targets(pos.z, p_mid[3].z, p_low[3].z, profs, settings.model_body_top, settings.model_body_middle, settings.model_body_bottom)
-                        write_macronode(nodes_elem, f"{prefix}Node-{i}", pos, settings.model_node_mass, settings.model_node_fixed, p_n, c_names)
-                if settings.model_include_necessary_tri_body:
-                    def w_tri(n1,n2,n3, suffix): ET.SubElement(figs_elem, f"{prefix}Foot-Triangle{suffix}", Type="Triangle", Shading="0", Node1=n1, Node2=n2, Node3=n3)
-                    w_tri("NHeel_1","NToe_1","NAnkle_1","1_1"); w_tri("NToeS_1","NToe_1","NHeel_1","2_1")
-                    w_tri("NHeel_2","NToe_2","NAnkle_2","1_2"); w_tri("NHeel_2","NToeS_2","NToe_2","2_2"); w_tri("NToeS_2","NToe_2","NAnkle_2","3_2")
-            elif expected_type == "MODEL":
-                pivot_idx = get_cloth_indices(o, settings.model_pivot) if settings.model_use_pivot else set()
-                name_map = {}
-                for v in verts:
-                    pos = o.matrix_world @ v.co
-                    is_cloth, is_piv = v.index in cloth_idx, v.index in pivot_idx
-                    is_macro = v.index in macro_idx and custom_p_nodes and custom_child_names
-                    name = "NPivot" if is_piv else f"{prefix}Node-{start_node + v.index}"
-                    name_map[v.index] = name
-                    
-                    if is_macro and not is_cloth:
-                        write_macronode(nodes_elem, name, pos, settings.model_node_mass, settings.model_node_fixed, custom_p_nodes, custom_child_names)
-                    else:
-                        attribs = {"Type": "Node", "X": str(pos.x), "Y": str(pos.z), "Z": str(-pos.y),
-                                   "Mass": str(settings.model_export_cloth_mass if is_cloth else settings.model_node_mass),
-                                   "Fixed": "0" if is_cloth else ("1" if settings.model_node_fixed else "0"),
-                                   "PinFixed": "0", "Visible": "1", "Passive": "0", "Cloth": "1" if is_cloth else "0",
-                                   "Collisible": "0" if is_cloth else ("1" if settings.model_node_collisible else "0")}
-                        if is_cloth: attribs.update({"Attenuation": f"{settings.model_export_cloth_attenuation:.2f}", "Rank": "0"})
-                        ET.SubElement(nodes_elem, name, **attribs)
-                store_edge(context, edges, verts, expected_type, edges_elem, start_edge, start_node, name_map)
-                store_face(context, faces, verts, expected_type, figs_elem, start_tri, start_node, name_map)
-            else:
-                if expected_type != "WEAPON" or settings.model_edge_include:
-                    store_edge(context, edges, verts, expected_type, edges_elem, start_edge, start_node)
-                    start_edge += len(edges)
-                    
-                store_face(context, faces, verts, expected_type, figs_elem, start_tri, start_node)
-                start_tri += len(faces)
-                start_node = process_object_nodes(o, verts, nodes_elem, start_node, prefix, settings, cloth_idx, p_nodes, child_reqs, macro_idx, custom_p_nodes, custom_child_names)
-            return True
-
-        if m_type == "MODEL": process_mesh_export(obj, "MODEL", [], settings.model_export_cloth_general_folder)
-        elif m_type == "HEAD_GEAR": process_mesh_export(obj, "HEAD_GEAR", ["NTop", "NHeadS_2", "NHeadS_1", "NHeadF"], settings.model_export_cloth_general_folder)
-        elif m_type == "BODY_GEAR": process_mesh_export(obj, "BODY_GEAR", [], settings.model_export_cloth_general_folder)
-        elif m_type == "WEAPON":
-            process_mesh_export(settings.weapon_object_1, "WEAPON", ["Weapon-Node4_1","Weapon-Node3_1","Weapon-Node2_1","Weapon-Node1_1"], settings.model_export_cloth_weapon1_folder)
-            process_mesh_export(settings.weapon_object_2, "WEAPON", ["Weapon-Node4_2","Weapon-Node3_2","Weapon-Node2_2","Weapon-Node1_2"], settings.model_export_cloth_weapon2_folder)
-            if settings.model_include_attack_edges:
-                process_mesh_export(settings.model_attack_edges_object_1, "WEAPON", ["Weapon-Node4_1","Weapon-Node3_1","Weapon-Node2_1","Weapon-Node1_1"], "", is_attack=True)
-                process_mesh_export(settings.model_attack_edges_object_2, "WEAPON", ["Weapon-Node4_2","Weapon-Node3_2","Weapon-Node2_2","Weapon-Node1_2"], "", is_attack=True)
-        elif m_type == "FOOT_GEAR":
-            process_mesh_export(settings.foot_object_1, "FOOT_GEAR", ["NToeS_1", "NToe_1", "NHeel_1", "NAnkle_1"], settings.model_export_cloth_foot1_folder)
-            process_mesh_export(settings.foot_object_2, "FOOT_GEAR", ["NToeS_2", "NToe_2", "NHeel_2", "NAnkle_2"], settings.model_export_cloth_foot2_folder)
-        elif m_type == "RANGED":
-            process_mesh_export(obj, "RANGED", ["Ranged-Node1_1","Ranged-Node2_1","Ranged-Node3_1","Ranged-Node4_1"], settings.model_export_cloth_general_folder)
-            if settings.model_include_attack_edges:
-                process_mesh_export(settings.model_attack_edges_object_1, "RANGED", ["Ranged-Node1_1","Ranged-Node2_1","Ranged-Node3_1","Ranged-Node4_1"], "", is_attack=True, is_ranged=True)
-        
-        # Capsules
-        if settings.model_export_capsules and settings.model_export_capsules_folder:
-            for obj_cap in settings.model_export_capsules_folder.objects:
-                if obj_cap.type != 'MESH': continue
-                mod = next((m for m in obj_cap.modifiers if m.type == 'NODES' and m.node_group), None)
-                if not mod: continue
-                
-                try:
-                    e1 = mod[mod.node_group.interface.items_tree["End1"].identifier]
-                    e2 = mod[mod.node_group.interface.items_tree["End2"].identifier]
-                    m1 = mod[mod.node_group.interface.items_tree["Margin1"].identifier]
-                    m2 = mod[mod.node_group.interface.items_tree["Margin2"].identifier]
-                    rad = mod[mod.node_group.interface.items_tree["Radius"].identifier]
-                except: continue
-                
-                if not e1 or not e2: continue
-                edge_val = mod[mod.node_group.interface.items_tree["Edge"].identifier] if settings.model_export_capsules_predefined else None
-                
-                if not settings.model_export_capsules_predefined:
-                    for e in edges_elem:
-                        if e.attrib.get('End1') == e1.name and e.attrib.get('End2') == e2.name: edge_val = e.tag; break
-                        elif e.attrib.get('End2') == e1.name and e.attrib.get('End1') == e2.name: edge_val = e.tag; m1, m2 = m2, m1; break
-                if edge_val:
-                    ET.SubElement(figs_elem, obj_cap.name, Type="Capsule", Edge=edge_val, Radius1=f"{rad:.2f}", Radius2=f"{rad:.2f}", Margin1=str(m1), Margin2=str(m2))
-
-        filepath = self.filepath if self.filepath.lower().endswith(".xml") else self.filepath + ".xml"
-        
-        with open(filepath, "w", encoding="utf-8") as f:
-            if settings.model_optimize_xml:
-                xml_string = '<?xml version="1.0" ?>\n' + ET.tostring(root, encoding="unicode")
-                f.write(xml_string)
-            else:
-                f.write(minidom.parseString(ET.tostring(root, encoding="unicode")).toprettyxml(indent="  "))
-                
-        self.report({'INFO'}, f"Model exported to {filepath}")
-        return {'FINISHED'}
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        root = ModelExporter(context, self.report).build()
+        path = write_xml_file(root, self.filepath, st.model_optimize_xml)
+        self.report({'INFO'}, f"Model exported to {path}")
 
     def invoke(self, context, event):
         self.filepath = bpy.path.abspath("//") + "exported_model.xml"
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
-class AddNodesOperator(bpy.types.Operator):
-    bl_idname = "model.add_nodes"
-    bl_label = "Import Nodes"
-    bl_description = "Add nodes from the Model XML into Blender as spheres"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    def execute(self, context):
-        model_path = None
-        model_path_unconvert = context.scene.gymnast_normal_xml
-        
-        if model_path_unconvert:
-            model_path = bpy.path.abspath(model_path_unconvert)
-        else:
-            self.report({'ERROR'}, "No model XML file selected")
-            return {'CANCELLED'}
-        
-        if not os.path.exists(model_path):
-            raise Exception("Model XML path is missing or invalid.")
-        
-        props = context.scene.gymnast_tool_model_props
 
-        # Create or get the "Model" collection
-        model_collection = bpy.data.collections.get("Model")
-        if not model_collection:
-            model_collection = bpy.data.collections.new("Model")
-            context.scene.collection.children.link(model_collection)
+class SetPivotOperator(GymnastOperator):
+    bl_idname = "model.set_pivot"
+    bl_label = "Set Pivot from Selection"
+    bl_description = "Turn the selected vertex (Edit Mode) into the NPivot vertex group."
 
-        # Create or get the child collection named after the model file
-        model_name = os.path.basename(model_path).split('.')[0]
-        child_collection = bpy.data.collections.get(model_name)
-        if not child_collection:
-            child_collection = bpy.data.collections.new(model_name)
-            model_collection.children.link(child_collection)
-
-        # Create or get the "Nodes_" collection
-        nodes_collection_name = f"Nodes_{model_name}"
-        nodes_collection = bpy.data.collections.get(nodes_collection_name)
-        if not nodes_collection:
-            nodes_collection = bpy.data.collections.new(nodes_collection_name)
-            child_collection.children.link(nodes_collection)
-
-        # Parse the XML file
-        tree = ET.parse(model_path)
-        root = tree.getroot()
-
-        nodes_section = root.find('Nodes')
-        if nodes_section is None:
-            self.report({'ERROR'}, "No <Nodes> section found in XML")
-            return {'CANCELLED'}
-        
-        # Store node positions for referencing
-        node_positions = {}
-        
-        # Pass 1: Parse all Nodes
-        for node in nodes_section:
-            ntype = node.get('Type')
-            if ntype in ['Node', 'CenterOfMass'] or (ntype == 'MacroNode' and not props.calculate_macronode):
-                x, y, z = safe_float(node.get('X')), safe_float(node.get('Y')), safe_float(node.get('Z'))
-                node_positions[node.tag] = (x, y, z)
-                
-        # Pass 2: Calculate MacroNodes via LCCs if enabled
-        if props.calculate_macronode:
-            for node in nodes_section:
-                if node.get('Type') == 'MacroNode':
-                    lcc_pos = [0.0, 0.0, 0.0]
-                    for i in range(1, 5):
-                        child_name = node.get(f'ChildNode{i}')
-                        lcc_val = node.get(f'LCC{i}')
-                        
-                        if child_name and child_name != "Null" and lcc_val:
-                            lcc = safe_float(lcc_val)
-                            
-                            if child_name in node_positions:
-                                cx, cy, cz = node_positions[child_name]
-                                lcc_pos[0] += cx * lcc
-                                lcc_pos[1] += cy * lcc
-                                lcc_pos[2] += cz * lcc
-                            else:
-                                blender_obj = bpy.data.objects.get(child_name)
-                                if blender_obj:
-                                    cx, cz, cy = blender_obj.location  # Blender is x,z,y
-                                    lcc_pos[0] += cx * lcc
-                                    lcc_pos[1] += cy * lcc
-                                    lcc_pos[2] += -cz * lcc
-                                    
-                    node_positions[node.tag] = tuple(lcc_pos)
-
-        # Generate the Geometry
-        if props.import_node_as_vertex:
-            # Add all points into a single mesh object
-            mesh = bpy.data.meshes.new(f"Nodes_{model_name}")
-            obj = bpy.data.objects.new(f"Nodes_{model_name}", mesh)
-            nodes_collection.objects.link(obj)
-            
-            verts = [(x, -z, y) for name, (x, y, z) in node_positions.items()]
-            mesh.from_pydata(verts, [], [])
-            mesh.update()
-            
-        else:
-            # Create one single UV Sphere mesh data block using BMesh
-            bm = bmesh.new()
-            bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, radius=1.0)
-            sphere_mesh = bpy.data.meshes.new("NodeSphereData")
-            bm.to_mesh(sphere_mesh)
-            bm.free()
-
-            # Quickly instantiate a new object pointing to that shared mesh for each node
-            for node_name, (x, y, z) in node_positions.items():
-                sphere = bpy.data.objects.new(node_name, sphere_mesh)
-                sphere.location = (x, -z, y)
-                sphere.scale = (1, 1, 1)
-                sphere.display.show_shadows = False
-                nodes_collection.objects.link(sphere)
-
-        self.report({'INFO'}, "Nodes added successfully")
-        return {'FINISHED'}
-
-class AddEdgesOperator(bpy.types.Operator):
-    bl_idname = "model.add_edges"
-    bl_label = "Import Nodes and Edges"
-    bl_description = "Add nodes as vertices and edges from the Model XML into blender as an object."
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
-        props = context.scene.gymnast_tool_model_props
-        dependencies_path = bpy.path.abspath(context.scene.gymnast_dependencies_xml) if context.scene.gymnast_dependencies_xml else None
-        model_path_unconvert = context.scene.gymnast_normal_xml
-        
-        if model_path_unconvert:
-            model_path = bpy.path.abspath(model_path_unconvert)
-        else:
-            self.report({'ERROR'}, "No model XML file selected")
-            return {'CANCELLED'}
-            
-        if not os.path.exists(model_path):
-            raise Exception("Model XML path is missing or invalid.")
-            
-        model_name = os.path.basename(model_path).split('.')[0]
-
-        # Parse the XML files
-        tree = ET.parse(model_path)
-        root = tree.getroot()
-
-        nodes_section = root.find('Nodes')
-        edges_section = root.find('Edges')
-
-        if nodes_section is None:
-            self.report({'ERROR'}, "No Nodes section found in XML")
-            return {'CANCELLED'}
-
-        # Preload dependencies if requested to prevent MacroNodes and Edges from breaking
-        dep_nodes_dict = {}
-        if props.model_use_dependencies and dependencies_path and os.path.exists(dependencies_path):
-            dep_tree = ET.parse(dependencies_path)
-            for d_node in dep_tree.getroot().find('Nodes') or []:
-                dep_nodes_dict[d_node.tag] = d_node
-        
-        verts = []
-        node_name_to_index = {}
-        nodes = {}
-        vertex_counter = 0
-
-        # First pass: regular nodes and CenterOfMass
-        macro_nodes = []
-        for node in nodes_section:
-            node_type = node.get('Type')
-            node_name = node.tag
-
-            if node_type in ['Node', 'CenterOfMass'] or (node_type == 'MacroNode' and not props.calculate_macronode):
-                x, y, z = safe_float(node.get('X')), safe_float(node.get('Y')), safe_float(node.get('Z'))
-                nodes[node_name] = (x, y, z)
-                verts.append((x, -z, y))
-                node_name_to_index[node_name] = vertex_counter
-                vertex_counter += 1
-            elif node_type == 'MacroNode' and props.calculate_macronode:
-                macro_nodes.append(node)
-
-        # Second pass: Calculate macro nodes via LCCs
-        if props.calculate_macronode:
-            for node in macro_nodes:
-                node_name = node.tag
-                lcc_pos = [0.0, 0.0, 0.0]
-
-                for i in range(1, 5):
-                    child_name = node.get(f'ChildNode{i}')
-                    lcc_val = node.get(f'LCC{i}')
-                    
-                    if child_name and child_name != "Null" and lcc_val:
-                        lcc = safe_float(lcc_val)
-
-                        if child_name in nodes:
-                            cx, cy, cz = nodes[child_name]
-                        elif child_name in dep_nodes_dict:
-                            d_node = dep_nodes_dict[child_name]
-                            cx, cy, cz = safe_float(d_node.get('X')), safe_float(d_node.get('Y')), safe_float(d_node.get('Z'))
-                        else:
-                            blender_obj = bpy.data.objects.get(child_name)
-                            if blender_obj:
-                                cx, cz, cy = blender_obj.location
-                                cy = -cy
-                            else:
-                                continue
-                            
-                        lcc_pos[0] += cx * lcc
-                        lcc_pos[1] += cy * lcc
-                        lcc_pos[2] += cz * lcc
-
-                x, y, z = lcc_pos
-                nodes[node_name] = (x, y, z)
-                verts.append((x, -z, y))
-                node_name_to_index[node_name] = vertex_counter
-                vertex_counter += 1
-
-        edges = []
-        if edges_section is not None:
-            for edge in edges_section:
-                end1 = edge.get('End1')
-                end2 = edge.get('End2')
-                
-                # Fallback to dependencies nodes if they are used as edge boundaries but weren't defined in the current XML
-                for end in (end1, end2):
-                    if end not in node_name_to_index and end in dep_nodes_dict:
-                        d_node = dep_nodes_dict[end]
-                        x, y, z = safe_float(d_node.get('X')), safe_float(d_node.get('Y')), safe_float(d_node.get('Z'))
-                        verts.append((x, -z, y))
-                        node_name_to_index[end] = vertex_counter
-                        vertex_counter += 1
-
-                if end1 in node_name_to_index and end2 in node_name_to_index:
-                    edges.append((node_name_to_index[end1], node_name_to_index[end2]))
-                    
-        # Create the mesh
-        mesh = bpy.data.meshes.new(f"Edges_{model_name}")
-        mesh.from_pydata(verts, edges, [])
-        mesh.update()
-
-        # Create the object
-        obj = bpy.data.objects.new(f"Edges_{model_name}", mesh)
-
-        model_collection = bpy.data.collections.get("Model") or bpy.data.collections.new("Model")
-        if model_collection.name not in context.scene.collection.children:
-            context.scene.collection.children.link(model_collection)
-
-        child_collection = bpy.data.collections.get(model_name) or bpy.data.collections.new(model_name)
-        if child_collection.name not in model_collection.children:
-            model_collection.children.link(child_collection)
-            
-        edges_collection_name = f"Edges_{model_name}"
-        edges_collection = bpy.data.collections.get(edges_collection_name) or bpy.data.collections.new(edges_collection_name)
-        if edges_collection.name not in child_collection.children:
-            child_collection.children.link(edges_collection)
-
-        edges_collection.objects.link(obj)
-
-        self.report({'INFO'}, "Edges imported successfully")
-        return {'FINISHED'}
-
-class AddCapsulesOperator(bpy.types.Operator):
-    bl_idname = "model.add_capsules"
-    bl_label = "Import Capsules"
-    bl_description = "Add Capsules from the model XML into Blender"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    def execute(self, context):
-        props = context.scene.gymnast_tool_model_props
-        
-        dependencies_path_unconvert = context.scene.gymnast_dependencies_xml
-        model_path_unconvert = context.scene.gymnast_normal_xml
-        
-        dependencies_path = bpy.path.abspath(dependencies_path_unconvert) if dependencies_path_unconvert else None
-        
-        if model_path_unconvert:
-            model_path = bpy.path.abspath(model_path_unconvert)
-        else:
-            self.report({'ERROR'}, "No model XML file selected")
-            return {'CANCELLED'}
-        
-        NODE_GROUP_NAME = "Smooth Capsules"
-        
-        if not os.path.exists(model_path):
-            raise Exception("Model XML path is missing or invalid.")
-        
-        if props.model_use_dependencies and not dependencies_path:
-            raise Exception("Dependencies path is missing or invalid.")
-        
-        if props.model_use_dependencies and dependencies_path and not os.path.exists(dependencies_path):
-            raise Exception("Dependencies XML path is missing or invalid.")
-        
-        def check_smooth_capsules():
-            node_group = bpy.data.node_groups.get("Smooth Capsules")
-            return node_group and node_group.bl_idname == 'GeometryNodeTree'
-        
-        def add_geometry_node():
-            misc_collection = bpy.data.collections.get("Misc") or bpy.data.collections.new("Misc")
-            if misc_collection.name not in context.scene.collection.children:
-                context.scene.collection.children.link(misc_collection)
-                
-            mesh_name = "GeometryNodeHolder"
-            mesh_data = bpy.data.meshes.new(mesh_name)
-            geometryNodeHolder_obj = bpy.data.objects.new(mesh_name, mesh_data)
-            misc_collection.objects.link(geometryNodeHolder_obj)
-            
-            node_tree_name = "Smooth Capsules"
-
-            if node_tree_name not in bpy.data.node_groups:
-                node_tree = bpy.data.node_groups.new(name=node_tree_name, type='GeometryNodeTree')
-            else:
-                node_tree = bpy.data.node_groups[node_tree_name]
-                
-            node_tree.is_modifier = True
-            
-            modifier = geometryNodeHolder_obj.modifiers.new(name="GeometryNodes", type='NODES')
-            modifier.node_group = node_tree
-
-            node_tree.nodes.clear()
-            nodes = node_tree.nodes
-            links = node_tree.links
-            interface = node_tree.interface
-            
-            def add_input(name, socket_type, default=None, subtype=None, min_val=None, max_val=None):
-                socket = interface.new_socket(name=name, in_out='INPUT', socket_type=socket_type)
-                if socket_type == 'NodeSocketFloat':
-                    if default is not None: socket.default_value = default
-                    if subtype: socket.subtype = subtype
-                    if min_val is not None: socket.min_value = min_val
-                    if max_val is not None: socket.max_value = max_val
-            
-            group_input = nodes.new("NodeGroupInput")
-            group_input.location = (0, 0)
-            add_input("End1", "NodeSocketObject")
-            add_input("End2", "NodeSocketObject")
-            add_input("Margin1", "NodeSocketFloat", default=0.0, subtype='FACTOR', min_val=0.0, max_val=1.0)
-            add_input("Margin2", "NodeSocketFloat", default=1.0, subtype='FACTOR', min_val=0.0, max_val=1.0)
-            add_input("Radius",  "NodeSocketFloat", default=0.0, subtype='DISTANCE', min_val=0.0)
-            add_input("Edge",  "NodeSocketString")
-            
-            group_input_2 = nodes.new(type=group_input.bl_idname)
-            group_input_2.location = (-190, -500)
-            
-            group_output = nodes.new("NodeGroupOutput")
-            group_output.location = (1750, 0)
-            if "Geometry" not in [s.name for s in node_tree.interface.items_tree]:
-                interface.new_socket(name="Geometry", in_out='OUTPUT', socket_type='NodeSocketGeometry')
-            
-            obj_info1 = nodes.new("GeometryNodeObjectInfo")
-            obj_info1.location = (200, 0)
-            obj_info1.inputs["As Instance"].default_value = False
-
-            obj_info2 = nodes.new("GeometryNodeObjectInfo")
-            obj_info2.location = (200, -220)
-            obj_info2.inputs["As Instance"].default_value = False
-            
-            shader_node_math_thing = nodes.new("ShaderNodeMath")
-            shader_node_math_thing.location = (450, -220)
-            shader_node_math_thing.operation = 'SUBTRACT'
-            shader_node_math_thing.use_clamp = True
-            shader_node_math_thing.inputs[0].default_value = 1
-            
-            curve_line = nodes.new("GeometryNodeCurvePrimitiveLine")
-            curve_line.location = (450, 0)
-            
-            trim_curve = nodes.new("GeometryNodeTrimCurve")
-            trim_curve.location = (650, 0)
-            
-            curve_circle = nodes.new("GeometryNodeCurvePrimitiveCircle")
-            curve_circle.location = (800, 0)
-            curve_circle.inputs["Resolution"].default_value = 16
-            
-            curve_to_mesh = nodes.new("GeometryNodeCurveToMesh")
-            curve_to_mesh.location = (1000, 0)
-            curve_to_mesh.inputs["Fill Caps"].default_value = False
-            
-            store_named_attribute_bevelinputcurve = nodes.new("GeometryNodeStoreNamedAttribute")
-            store_named_attribute_bevelinputcurve.location = (1250, 0)
-            store_named_attribute_bevelinputcurve.data_type = 'FLOAT_VECTOR'
-            store_named_attribute_bevelinputcurve.domain = 'POINT'
-            store_named_attribute_bevelinputcurve.inputs["Name"].default_value = "nor"
-            
-            normal_bevelinputcurve = nodes.new("GeometryNodeInputNormal")
-            normal_bevelinputcurve.location = (1000, -200)
-            
-            uv_sphere = nodes.new("GeometryNodeMeshUVSphere")
-            uv_sphere.location = (0, -500)
-            uv_sphere.inputs["Segments"].default_value = 16
-            uv_sphere.inputs["Rings"].default_value = 8
-            
-            store_named_attribute_halfspherecap = nodes.new("GeometryNodeStoreNamedAttribute")
-            store_named_attribute_halfspherecap.location = (200, -500)
-            store_named_attribute_halfspherecap.data_type = 'FLOAT_VECTOR'
-            store_named_attribute_halfspherecap.domain = 'POINT'
-            store_named_attribute_halfspherecap.inputs["Name"].default_value = "nor"
-            
-            normal_halfspherecap = nodes.new("GeometryNodeInputNormal")
-            normal_halfspherecap.location = (0, -680)
-            
-            delete_geometry = nodes.new("GeometryNodeDeleteGeometry")
-            delete_geometry.location = (450, -500)
-            delete_geometry.domain = 'FACE'
-            delete_geometry.mode = 'ALL'
-            
-            input_position = nodes.new("GeometryNodeInputPosition")
-            input_position.location = (0, -800)
-
-            separate_xyz = node_tree.nodes.new("ShaderNodeSeparateXYZ")
-            separate_xyz.location = (180, -800)
-            
-            compare_node = node_tree.nodes.new("FunctionNodeCompare")
-            compare_node.location = (350, -800)
-            compare_node.data_type = 'FLOAT'
-            compare_node.operation = 'LESS_THAN'
-            
-            set_shade_smooth = nodes.new("GeometryNodeSetShadeSmooth")
-            set_shade_smooth.location = (710, -500)
-            
-            end_point_selection_halfspherecap = nodes.new("GeometryNodeCurveEndpointSelection")
-            end_point_selection_halfspherecap.location = (880, -500)
-            
-            instance_on_points = nodes.new("GeometryNodeInstanceOnPoints")
-            instance_on_points.location = (1100, -500)
-            
-            store_named_attribute_halfspherecap2 = nodes.new("GeometryNodeStoreNamedAttribute")
-            store_named_attribute_halfspherecap2.location = (1350, -500)
-            store_named_attribute_halfspherecap2.data_type = 'FLOAT_VECTOR'
-            store_named_attribute_halfspherecap2.domain = 'INSTANCE'
-            store_named_attribute_halfspherecap2.inputs["Name"].default_value = "inst_rot"
-            
-            instance_rotation = nodes.new("GeometryNodeInputInstanceRotation")
-            instance_rotation.location = (1350, -780)
-            
-            euler_to_rotation = nodes.new("FunctionNodeEulerToRotation")
-            euler_to_rotation.location = (1020, -300)
-            
-            curve_tangent = nodes.new("GeometryNodeInputTangent")
-            curve_tangent.location = (0, -1500)
-            
-            end_point_selection_aligncap = nodes.new("GeometryNodeCurveEndpointSelection")
-            end_point_selection_aligncap.location = (200, -1400)
-            end_point_selection_aligncap.inputs["End Size"].default_value = 0
-            
-            vector_math = nodes.new("ShaderNodeVectorMath")
-            vector_math.location = (200, -1650)
-            vector_math.operation = 'SCALE'
-            vector_math.inputs["Scale"].default_value = -1
-            
-            switch_node = nodes.new("GeometryNodeSwitch")
-            switch_node.location = (420, -1500)
-            switch_node.input_type = 'VECTOR'
-            
-            align_rotation_to_vector_1 = nodes.new("FunctionNodeAlignRotationToVector")
-            align_rotation_to_vector_1.location = (630, -1500)
-            align_rotation_to_vector_1.axis = 'Z'
-            align_rotation_to_vector_1.pivot_axis = 'AUTO'
-            
-            align_rotation_to_vector_2 = nodes.new("FunctionNodeAlignRotationToVector")
-            align_rotation_to_vector_2.location = (820, -1500)
-            align_rotation_to_vector_2.axis = 'X'
-            align_rotation_to_vector_2.pivot_axis = 'AUTO'
-            
-            normal_aligncap = nodes.new("GeometryNodeInputNormal")
-            normal_aligncap.location = (420, -1800)
-            
-            join_geo = nodes.new("GeometryNodeJoinGeometry")
-            join_geo.location = (1500, 0)
-            
-            links.new(group_input.outputs["End1"], obj_info1.inputs[0])
-            links.new(group_input.outputs["End2"], obj_info2.inputs[0])
-            links.new(obj_info1.outputs["Location"], curve_line.inputs["Start"])
-            links.new(obj_info2.outputs["Location"], curve_line.inputs["End"])
-            links.new(curve_line.outputs["Curve"], trim_curve.inputs["Curve"])
-            links.new(group_input.outputs["Margin1"], trim_curve.inputs["Start"])
-            links.new(group_input.outputs["Margin2"], shader_node_math_thing.inputs[1])
-            links.new(shader_node_math_thing.outputs["Value"], trim_curve.inputs["End"])
-            links.new(trim_curve.outputs["Curve"], curve_to_mesh.inputs["Curve"])
-            links.new(group_input.outputs["Radius"], curve_circle.inputs["Radius"])
-            links.new(curve_circle.outputs["Curve"], curve_to_mesh.inputs["Profile Curve"])
-            links.new(curve_to_mesh.outputs["Mesh"], store_named_attribute_bevelinputcurve.inputs["Geometry"])
-            links.new(normal_bevelinputcurve.outputs["Normal"], store_named_attribute_bevelinputcurve.inputs["Value"])
-            links.new(store_named_attribute_bevelinputcurve.outputs["Geometry"], join_geo.inputs["Geometry"])
-            
-            links.new(group_input_2.outputs["Radius"], uv_sphere.inputs["Radius"])
-            links.new(uv_sphere.outputs["Mesh"], store_named_attribute_halfspherecap.inputs["Geometry"])
-            links.new(normal_halfspherecap.outputs["Normal"], store_named_attribute_halfspherecap.inputs["Value"])
-            links.new(store_named_attribute_halfspherecap.outputs["Geometry"], delete_geometry.inputs["Geometry"])
-            links.new(input_position.outputs["Position"], separate_xyz.inputs["Vector"])
-            links.new(separate_xyz.outputs["Z"], compare_node.inputs["A"])
-            links.new(compare_node.outputs["Result"], delete_geometry.inputs["Selection"])
-            links.new(delete_geometry.outputs["Geometry"], set_shade_smooth.inputs["Geometry"])
-            links.new(set_shade_smooth.outputs["Geometry"], instance_on_points.inputs["Instance"])
-            links.new(end_point_selection_halfspherecap.outputs["Selection"], instance_on_points.inputs["Selection"])
-            links.new(trim_curve.outputs["Curve"], instance_on_points.inputs["Points"])
-            links.new(euler_to_rotation.outputs["Rotation"], instance_on_points.inputs["Rotation"])
-            links.new(align_rotation_to_vector_2.outputs["Rotation"], euler_to_rotation.inputs["Euler"])
-            links.new(instance_on_points.outputs["Instances"], store_named_attribute_halfspherecap2.inputs["Geometry"])
-            links.new(instance_rotation.outputs["Rotation"], store_named_attribute_halfspherecap2.inputs["Value"])
-            links.new(store_named_attribute_halfspherecap2.outputs["Geometry"], join_geo.inputs["Geometry"])
-            
-            links.new(curve_tangent.outputs["Tangent"], vector_math.inputs["Vector"])
-            links.new(curve_tangent.outputs["Tangent"], switch_node.inputs["False"])
-            links.new(vector_math.outputs["Vector"], switch_node.inputs["True"])
-            links.new(end_point_selection_aligncap.outputs["Selection"], switch_node.inputs["Switch"])
-            links.new(switch_node.outputs["Output"], align_rotation_to_vector_1.inputs["Vector"])
-            links.new(align_rotation_to_vector_1.outputs["Rotation"], align_rotation_to_vector_2.inputs["Rotation"])
-            links.new(normal_aligncap.outputs["Normal"], align_rotation_to_vector_2.inputs["Vector"])
-            
-            links.new(join_geo.outputs["Geometry"], group_output.inputs["Geometry"])
-            node_tree.use_fake_user = True
-        
-        def load_edges_from_xml(path):
-            tree = ET.parse(path)
-            root = tree.getroot()
-            edge_dict = {}
-            edges_elem = root.find("Edges")
-            if edges_elem is not None:
-                for edge in edges_elem:
-                    edge_dict[edge.tag] = {
-                        'End1': edge.attrib['End1'],
-                        'End2': edge.attrib['End2']
-                    }
-            return root, edge_dict
-        
-        if not check_smooth_capsules():
-            add_geometry_node()
-        
-        model_filename = os.path.splitext(os.path.basename(model_path))[0]
-        model_collection_name = model_filename
-        capsule_collection_name = f"Capsules_{model_filename}"
-        
-        model_root = bpy.data.collections.get("Model") or bpy.data.collections.new("Model")
-        if model_root.name not in context.scene.collection.children:
-            context.scene.collection.children.link(model_root)
-
-        model_sub = bpy.data.collections.get(model_collection_name) or bpy.data.collections.new(model_collection_name)
-        if model_sub.name not in model_root.children:
-            model_root.children.link(model_sub)
-
-        capsule_collection = bpy.data.collections.get(capsule_collection_name) or bpy.data.collections.new(capsule_collection_name)
-        if capsule_collection.name not in model_sub.children:
-            model_sub.children.link(capsule_collection)
-        
-        root_primary, edges_primary = load_edges_from_xml(model_path)
-        if props.model_use_dependencies and dependencies_path is not None and os.path.exists(dependencies_path):
-            _, edges_secondary = load_edges_from_xml(dependencies_path)
-            edges = {**edges_secondary, **edges_primary}
-        else:
-            edges = dict(edges_primary)
-        
-        node_group = bpy.data.node_groups.get(NODE_GROUP_NAME)
-        if not node_group:
-            raise Exception(f"Geometry Node Group '{NODE_GROUP_NAME}' not found.")
-            
-        socket_map = {socket.name: socket.identifier for socket in node_group.interface.items_tree if socket.in_out == 'INPUT'}
-        
-        # Create a single lightweight mesh data block to be shared among all capsule objects
-        # We MUST add at least one dummy vertex, otherwise Blender's Depsgraph will ignore the object 
-        # and the Geometry Nodes won't evaluate or render on the screen
-        shared_capsule_mesh = bpy.data.meshes.new("CapsuleBaseMesh")
-        shared_capsule_mesh.from_pydata([(0.0, 0.0, 0.0)], [], [])
-        shared_capsule_mesh.update()
-
-        capsules = [fig for fig in root_primary.find("Figures") if fig.attrib.get("Type") == "Capsule"]
-        
-        for capsule in capsules:
-            capsule_name = capsule.tag
-            edge_name = capsule.attrib["Edge"]
-            
-            edge_info = edges.get(edge_name)
-            if not edge_info: continue
-
-            end1_obj = bpy.data.objects.get(edge_info["End1"])
-            end2_obj = bpy.data.objects.get(edge_info["End2"])
-            if not end1_obj or not end2_obj: continue
-
-            radius1 = safe_float(capsule.attrib.get("Radius1", 1.0))
-            margin1 = safe_float(capsule.attrib.get("Margin1", 0.0))
-            margin2 = safe_float(capsule.attrib.get("Margin2", 0.0))
-
-            # Instantiate the object directly sharing the dummy vertex mesh
-            capsule_obj = bpy.data.objects.new(capsule_name, shared_capsule_mesh)
-            capsule_collection.objects.link(capsule_obj)
-
-            modifier = capsule_obj.modifiers.new(name="GeometryNodes", type='NODES')
-            modifier.node_group = node_group
-
-            try:
-                modifier[socket_map["End1"]] = end1_obj
-                modifier[socket_map["End2"]] = end2_obj
-                modifier[socket_map["Margin1"]] = margin1
-                modifier[socket_map["Margin2"]] = margin2
-                modifier[socket_map["Radius"]] = radius1
-                modifier[socket_map["Edge"]] = edge_name
-            except KeyError as e:
-                print(f"Socket name missing in Geometry Node Group: {e}")
-        
-        # Force the viewport to update and draw the new capsules
-        context.view_layer.update()
-        
-        self.report({'INFO'}, f"Imported {len(capsules)} capsules.")
-        return {'FINISHED'}
- 
-class SetOrientation(bpy.types.Operator):
-    bl_idname = "model.set_orientation"
-    bl_label = "Set Orientation"
-    bl_description = "Set the Orientation of the Object's Origin"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    def execute(self, context):
+    def run(self, context):
         st = context.scene.gymnast_tool_model_props
-        m_type = st.model_type_export
-        adv = st.model_is_advanced
-        
-        # --- Handle Body Gear ---
-        if not adv and m_type == 'BODY_GEAR':
-            model_path_unconvert = context.scene.gymnast_normal_xml
-            if not model_path_unconvert:
-                self.report({'ERROR'}, "No model XML file selected")
-                return {'CANCELLED'}
-                
-            model_path = bpy.path.abspath(model_path_unconvert)
-            model_name = os.path.basename(model_path).split('.')[0]
-            
-            # Setup Collections for Hooks
-            model_collection = bpy.data.collections.get("Model") or bpy.data.collections.new("Model")
-            if model_collection.name not in context.scene.collection.children:
-                context.scene.collection.children.link(model_collection)
-                
-            child_collection = bpy.data.collections.get(model_name) or bpy.data.collections.new(model_name)
-            if child_collection.name not in model_collection.children:
-                model_collection.children.link(child_collection)
-                
-            hook_collection_name = f"Hook_{model_name}"
-            hook_collection = bpy.data.collections.get(hook_collection_name) or bpy.data.collections.new(hook_collection_name)
-            if hook_collection.name not in child_collection.children:
-                child_collection.children.link(hook_collection)
-                
-            # Alignment configurations based on Body Gear section
-            alignment_profiles = {
-                'CHEST': {'copy_location': "NChest", 'track_1': "NNeck", 'track_2': "NChestF", 'track_3': "NChestS_2"},
-                'STOMACH': {'copy_location': "NStomach", 'track_1': "NChest", 'track_2': "NStomachF", 'track_3': "NStomachS_2"},
-                'HIP': {'copy_location': "NPivot", 'track_1': "NStomach", 'track_2': "NPelvisF", 'track_3': "NHip_2"}
-            }
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            raise ModelError("Select the model object and one vertex in Edit Mode.")
+        mode = obj.mode
+        if mode == 'EDIT':
+            obj.update_from_editmode()
+        selected = [v.index for v in obj.data.vertices if v.select]
+        if len(selected) != 1:
+            raise ModelError(f"Select exactly one vertex (currently {len(selected)}).")
+        if mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        vg = obj.vertex_groups.get("NPivot") or obj.vertex_groups.new(name="NPivot")
+        old = list(vertex_group_indices(obj, "NPivot"))
+        if old:
+            vg.remove(old)
+        vg.add(selected, 1.0, 'REPLACE')
+        if mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode=mode)
+        if not st.selected_object:
+            st.selected_object = obj
+        st.model_use_pivot, st.model_pivot_source, st.model_pivot = True, 'GROUP', "NPivot"
+        self.report({'INFO'}, f"Vertex {selected[0]} is now the NPivot.")
 
-            def create_hook(vgroup_name, hook_suffix, alignment_type):
-                if not st.selected_object or vgroup_name not in [vg.name for vg in st.selected_object.vertex_groups]:
-                    return
 
-                profile = alignment_profiles.get(alignment_type)
-                if not profile:
-                    return
 
-                # Create Empty Object for the Hook
-                hook_name = f"Hook_{hook_suffix}_{model_name}"
-                empty = bpy.data.objects.new(hook_name, None)
-                empty.empty_display_type = 'PLAIN_AXES'
-                hook_collection.objects.link(empty)
 
-                # Set up Constraints on the Empty
-                if profile['copy_location']:
-                    target = bpy.data.objects.get(profile['copy_location'])
-                    if target:
-                        constraint = empty.constraints.new(type='COPY_LOCATION')
-                        constraint.target = target
+# =========================================== #
+#  Skeleton binding
+# =========================================== #
+#  A vertex v is stored in the XML as  v = sum(LCC_i * child_i).  The same formula is evaluated live by a
+#  Geometry Nodes modifier, so negative LCCs and badly shaped tetrahedrons functions like in the game.
 
-                for axis, key in zip(['TRACK_Z', 'TRACK_Y', 'TRACK_X'], ['track_1', 'track_2', 'track_3']):
-                    if st.model_align_flipped and axis == 'TRACK_X':
-                        axis = 'TRACK_NEGATIVE_X'
-                        
-                    target_obj = bpy.data.objects.get(profile[key])
-                    if target_obj:
-                        constraint = empty.constraints.new(type='DAMPED_TRACK')
-                        constraint.track_axis = axis
-                        constraint.target = target_obj
-                
-                context.view_layer.update()
-                
-                # Apply Hook Modifier to Mesh
-                mod = st.selected_object.modifiers.new(name=f"Hook_{vgroup_name}", type='HOOK')
-                mod.object = empty
-                mod.vertex_group = vgroup_name
-                
-                # Target the exact vertices inside the vertex group
-                if st.selected_object.type == 'MESH':
-                    mesh = st.selected_object.data
-                    bm = bmesh.new()
-                    bm.from_mesh(mesh)
-                    group_index = st.selected_object.vertex_groups[vgroup_name].index
-                    verts_in_group = [v.index for v in mesh.vertices if any(g.group == group_index for g in v.groups)]
-                    if verts_in_group:
-                        mod.vertex_indices_set(verts_in_group)
-                    bm.free()
+def ensure_rig_group():
+    existing = bpy.data.node_groups.get(RIG_GROUP)
+    if existing and existing.bl_idname == 'GeometryNodeTree':
+        return existing
+    if existing:
+        bpy.data.node_groups.remove(existing)
 
-            # Hooks Generation
-            create_hook("Armor_Top", "Top", st.model_body_top)
-            create_hook("Armor_Middle", "Middle", st.model_body_middle)
-            create_hook("Armor_Bottom", "Bottom", st.model_body_bottom)
-            
-            self.report({'INFO'}, "Body Gear constraints generated.")
-            return {'FINISHED'}
+    ng = bpy.data.node_groups.new(RIG_GROUP, 'GeometryNodeTree')
+    ng.is_modifier = True
+    ng.use_fake_user = True
+    iface, links = ng.interface, ng.links
 
-        configs = []
-        if adv or m_type == 'MODEL':
-            if not st.model_orientation or not st.model_origin_object:
-                self.report({'ERROR'}, "Both objects must be specified."); return {'CANCELLED'}
-            sel = [o for o in context.selected_objects if o != st.model_orientation]
-            if len(sel) != 2: self.report({'ERROR'}, "Select exactly two other objects."); return {'CANCELLED'}
-            configs.append((st.model_orientation, st.model_origin_object, sel[0], sel[1], None, 'TRACK_X'))
-            
-        elif m_type == 'WEAPON':
-            n_dict = get_child_nodes_dict(["Weapon-Node2_1","Weapon-Node1_1","Weapon-Node3_1","Weapon-Node4_1",
-                                           "Weapon-Node2_2","Weapon-Node1_2","Weapon-Node3_2","Weapon-Node4_2"], self.report)
-            if not n_dict: return {'CANCELLED'}
-            if st.weapon_object_1: configs.append((st.weapon_object_1, bpy.data.objects["Weapon-Node2_1"], bpy.data.objects["Weapon-Node1_1"], bpy.data.objects["Weapon-Node3_1"], bpy.data.objects["Weapon-Node4_1"], 'TRACK_NEGATIVE_X'))
-            if st.weapon_object_2: configs.append((st.weapon_object_2, bpy.data.objects["Weapon-Node2_2"], bpy.data.objects["Weapon-Node1_2"], bpy.data.objects["Weapon-Node3_2"], bpy.data.objects["Weapon-Node4_2"], 'TRACK_X'))
-            
-        elif m_type == 'FOOT_GEAR':
-            n_dict = get_child_nodes_dict(["NToe_1","NHeel_1","NToeS_1","NToe_2","NHeel_2","NToeS_2"], self.report)
-            if not n_dict: return {'CANCELLED'}
-            if st.foot_object_1: configs.append((st.foot_object_1, bpy.data.objects["NToe_1"], bpy.data.objects["NHeel_1"], bpy.data.objects["NToeS_1"], None, 'TRACK_X'))
-            if st.foot_object_2: configs.append((st.foot_object_2, bpy.data.objects["NToe_2"], bpy.data.objects["NHeel_2"], bpy.data.objects["NToeS_2"], None, 'TRACK_X'))
-            
-        elif m_type == 'HEAD_GEAR':
-            if not st.selected_object: return {'CANCELLED'}
-            n_dict = get_child_nodes_dict(["NHead","NTop","NHeadF","NHeadS_2"], self.report)
-            if not n_dict: return {'CANCELLED'}
-            configs.append((st.selected_object, bpy.data.objects["NHead"], bpy.data.objects["NTop"], bpy.data.objects["NHeadF"], bpy.data.objects["NHeadS_2"], 'TRACK_NEGATIVE_X' if st.model_align_flipped else 'TRACK_X'))
-            
-        elif m_type == 'RANGED':
-            if not st.selected_object: return {'CANCELLED'}
-            n_dict = get_child_nodes_dict(["Ranged-Node2_1","Ranged-Node1_1","Ranged-Node4_1","Ranged-Node3_1"], self.report)
-            if not n_dict: return {'CANCELLED'}
-            configs.append((st.selected_object, bpy.data.objects["Ranged-Node2_1"], bpy.data.objects["Ranged-Node1_1"], bpy.data.objects["Ranged-Node4_1"], bpy.data.objects["Ranged-Node3_1"], 'TRACK_X'))
+    def socket(name, kind, io='INPUT'):
+        iface.new_socket(name=name, in_out=io, socket_type=kind)
 
-        # alignments
-        for obj, orig, tz, ty, tx, track_x in configs:
-            translate_origin_to_target(obj, orig.location)
-            
-            if st.model_apply_constraint or m_type in {'WEAPON', 'FOOT_GEAR', 'HEAD_GEAR', 'RANGED'}:
-                obj.matrix_world.translation = Vector((0,0,0))
-                align_object_to_basis(obj, orig.location, tz, ty)
-                setup_tracking_constraints(obj, orig, tz, ty, tx, track_x, use_offset=True)
+    socket("Geometry", 'NodeSocketGeometry')
+    socket("Selection Group", 'NodeSocketString')
+    for k in range(1, 5):
+        socket(f"Child {k}", 'NodeSocketObject')
+    socket("Rest Origin", 'NodeSocketVector')
+    for k in range(1, 4):
+        socket(f"Row {k}", 'NodeSocketVector')
+    socket("Geometry", 'NodeSocketGeometry', 'OUTPUT')
 
-        self.report({'INFO'}, "Orientation applied successfully.")
-        return {'FINISHED'}
+    gi = add_node(ng, "NodeGroupInput", (-1500, 0))
+    go = add_node(ng, "NodeGroupOutput", (1000, 0))
+
+    # barycentric weights from the rest pose:  l1..l3 = row_k . (p - R4),   l4 = 1 - l1 - l2 - l3
+    position = add_node(ng, "GeometryNodeInputPosition", (-1300, -300))
+    offset = add_node(ng, "ShaderNodeVectorMath", (-1100, -300), operation='SUBTRACT')
+    links.new(out(position, "Position"), offset.inputs[0])
+    links.new(gi.outputs["Rest Origin"], offset.inputs[1])
+    weights = []
+    for k in range(3):
+        dot = add_node(ng, "ShaderNodeVectorMath", (-900, -300 - 180 * k), operation='DOT_PRODUCT')
+        links.new(out(offset, "Vector"), dot.inputs[0])
+        links.new(gi.outputs[f"Row {k + 1}"], dot.inputs[1])
+        weights.append(out(dot, "Value"))
+    rest = None
+    for k in range(3):
+        sub = add_node(ng, "ShaderNodeMath", (-700, -300 - 150 * k), operation='SUBTRACT')
+        if rest is None:
+            sub.inputs[0].default_value = 1.0
+        else:
+            links.new(rest, sub.inputs[0])
+        links.new(weights[k], sub.inputs[1])
+        rest = out(sub, "Value")
+    weights.append(rest)
+
+    # new position = sum(l_i * child_i)   (child positions relative to the modified object)
+    total = None
+    for k in range(4):
+        info = add_node(ng, "GeometryNodeObjectInfo", (-700, 400 - 200 * k), transform_space='RELATIVE')
+        links.new(gi.outputs[f"Child {k + 1}"], info.inputs["Object"])
+        scaled = add_node(ng, "ShaderNodeVectorMath", (-400, 400 - 200 * k), operation='SCALE')
+        links.new(out(info, "Location"), scaled.inputs[0])
+        links.new(weights[k], scaled.inputs["Scale"])
+        if total is None:
+            total = out(scaled, "Vector")
+        else:
+            added = add_node(ng, "ShaderNodeVectorMath", (-150, 400 - 200 * k), operation='ADD')
+            links.new(total, added.inputs[0])
+            links.new(out(scaled, "Vector"), added.inputs[1])
+            total = out(added, "Vector")
+
+    named = add_node(ng, "GeometryNodeInputNamedAttribute", (200, -300), data_type='FLOAT')
+    links.new(gi.outputs["Selection Group"], named.inputs["Name"])
+    setpos = add_node(ng, "GeometryNodeSetPosition", (600, 0))
+    links.new(gi.outputs["Geometry"], setpos.inputs["Geometry"])
+    links.new(out(named, "Attribute"), setpos.inputs["Selection"])
+    links.new(total, setpos.inputs["Position"])
+    links.new(setpos.outputs["Geometry"], go.inputs["Geometry"])
+    return ng
+
+
+def clear_rig(obj):
+    for mod in [m for m in obj.modifiers if m.name.startswith(RIG_PREFIX)]:
+        obj.modifiers.remove(mod)
+    for vg in [g for g in obj.vertex_groups if g.name.startswith(RIG_PREFIX)]:
+        obj.vertex_groups.remove(vg)
+
+
+def add_rig_modifier(obj, key, children, report):
+    group = ensure_rig_group()
+    ids = socket_ids(group)
+    inv = obj.matrix_world.inverted()
+    rest = [inv @ p for p in children.points]                       # rest tetrahedron in object space
+    basis = Matrix((rest[0] - rest[3], rest[1] - rest[3], rest[2] - rest[3])).transposed()
+    if abs(basis.determinant()) < 1e-9:
+        report({'WARNING'}, f"'{key}': the four child nodes are (almost) flat - the result may jitter.")
+    rows = basis.inverted_safe()
+
+    mod = obj.modifiers.new(name=f"{RIG_PREFIX}Rig {key}", type='NODES')
+    mod.node_group = group
+    set_input(mod, ids["Selection Group"], f"{RIG_PREFIX}{key}")
+    for k in range(4):
+        set_input(mod, ids[f"Child {k + 1}"], children.objects[k])
+    set_input(mod, ids["Rest Origin"], tuple(rest[3]))
+    for k in range(3):
+        set_input(mod, ids[f"Row {k + 1}"], tuple(rows[k]))
+    obj.update_tag()
+
+
+def bind_slot(slot, custom, body, report):
+    obj = slot.obj
+    clear_rig(obj)
+    mw = obj.matrix_world
+    macro = vertex_group_indices(obj, slot.macro) if custom else set()
+    fixed = ChildSet.from_names(slot.children) if slot.children else None
+    buckets = {}
+    for v in obj.data.vertices:
+        if v.index in macro:
+            key, children = "Custom", custom
+        elif body:
+            key = body.region((mw @ v.co).z)
+            children = body.children(key)
+        elif fixed:
+            key, children = "All", fixed
+        else:
+            continue
+        buckets.setdefault(key, (children, []))[1].append(v.index)
+    for key, (children, indices) in buckets.items():
+        obj.vertex_groups.new(name=f"{RIG_PREFIX}{key}").add(indices, 1.0, 'REPLACE')
+        add_rig_modifier(obj, key, children, report)
+    return len(buckets)
+
+
+class BindLCCOperator(GymnastOperator):
+    bl_idname = "model.bind_lcc"
+    bl_label = "Bind to Skeleton"
+    bl_description = ("Make the model follow its child nodes\n"
+                      "Do this while the skeleton is in its rest pose")
+
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        slots = usable_slots(st, context.active_object)
+        if not slots:
+            raise ModelError("Pick the object(s) to bind in the Export Settings first.")
+        require_nodes(slot_node_names(slots))
+        custom = custom_childset(st, self.report)
+        body = BodyGear(st) if st.model_type_export == 'BODY_GEAR' else None
+        count = sum(bind_slot(s, custom, body, self.report) for s in slots)
+        if not count:
+            raise ModelError("Nothing to bind. This type has no standard child nodes - enable Custom ChildNodes.")
+        self.report({'INFO'}, f"Bound {count} vertex region(s) with {len(slots)} object(s).")
+
+
+class UnbindLCCOperator(GymnastOperator):
+    bl_idname = "model.unbind_lcc"
+    bl_label = "Remove Binding"
+    bl_description = "Remove the LCC modifiers and vertex groups created by Bind to Skeleton"
+
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        targets = {s.obj for s in usable_slots(st, context.active_object)} | set(context.selected_objects)
+        for obj in targets:
+            if obj.type == 'MESH':
+                clear_rig(obj)
+        self.report({'INFO'}, "Binding removed.")
+
+
+
+
+# ----------------------------------------------------------------------------- #
+#  Rigid follow, for standalone models without child nodes
+# ----------------------------------------------------------------------------- #
+
+def reframe_object(obj, new_world):
+    """Give `obj` a new origin / orientation without moving its mesh in world space."""
+    old = obj.matrix_world.copy()
+    if obj.type == 'MESH':
+        if obj.data.users > 1:
+            obj.data = obj.data.copy()
+        obj.data.transform(new_world.inverted() @ old)
+    obj.matrix_world = new_world
+
+
+class SetOrientation(GymnastOperator):
+    bl_idname = "model.set_orientation"
+    bl_label = "Set Origin / Rigid Follow"
+    bl_description = ("Move the object's origin to the Origin object.\nWith 'Add Constraint', the object also follows the Origin object's Z and Y axes.")
+
+    def run(self, context):
+        st = context.scene.gymnast_tool_model_props
+        obj, origin = st.model_orientation, st.model_origin_object
+        if not obj or not origin:
+            raise ModelError("Both the Object and the Origin object must be specified.")
+        origin_loc = origin.matrix_world.translation.copy()
+
+        new_world = obj.matrix_world.copy()
+        new_world.translation = origin_loc
+        if not st.model_apply_constraint:
+            reframe_object(obj, new_world)
+            self.report({'INFO'}, "Origin moved.")
+            return
+
+        tz, ty = st.model_target_z, st.model_target_y
+        if not (tz and ty):                                  # old workflow: two other selected objects
+            others = [o for o in context.selected_objects if o != obj]
+            if len(others) != 2:
+                raise ModelError("Set the Z / Y targets, or select exactly two other objects.")
+            tz, ty = others
+        z_dir = (tz.matrix_world.translation - origin_loc).normalized()
+        y_dir = (ty.matrix_world.translation - origin_loc).normalized()
+        x_dir = y_dir.cross(z_dir).normalized()
+        y_dir = z_dir.cross(x_dir).normalized()
+        new_world = Matrix.Translation(origin_loc) @ Matrix((x_dir, y_dir, z_dir)).transposed().to_4x4()
+        reframe_object(obj, new_world)
+
+        obj.constraints.clear()
+        obj.constraints.new('COPY_LOCATION').target = origin
+        track_z = obj.constraints.new('DAMPED_TRACK')
+        track_z.target, track_z.track_axis = tz, 'TRACK_Z'
+        track_y = obj.constraints.new('LOCKED_TRACK')     # keeps Z fixed, so a non-perpendicular Y target cannot tilt it
+        track_y.target, track_y.track_axis, track_y.lock_axis = ty, 'TRACK_Y', 'LOCK_Z'
+        self.report({'INFO'}, "Origin moved and follow constraints added.")
+
+
+
+
+# ----------------------------------------------------------------------------- #
+#  Macro rule list
+# ----------------------------------------------------------------------------- #
 
 class AddRuleOperator(bpy.types.Operator):
     bl_idname = "macro_rules.add_rule"
@@ -1368,72 +1218,54 @@ class AddRuleOperator(bpy.types.Operator):
         context.scene.macro_rules_index = len(context.scene.macro_rules) - 1
         return {'FINISHED'}
 
+
 class RemoveRuleOperator(bpy.types.Operator):
     bl_idname = "macro_rules.remove_rule"
     bl_label = "Remove Rule"
-    bl_description = "Remove a group rule."
+    bl_description = "Remove the selected group rule."
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        index = context.scene.macro_rules_index
-        if index >= 0:
-            context.scene.macro_rules.remove(index)
-            context.scene.macro_rules_index = min(index, len(context.scene.macro_rules) - 1)
+        scene = context.scene
+        if 0 <= scene.macro_rules_index < len(scene.macro_rules):
+            scene.macro_rules.remove(scene.macro_rules_index)
+            scene.macro_rules_index = max(0, min(scene.macro_rules_index, len(scene.macro_rules) - 1))
         return {'FINISHED'}
+
 
 class AddTemplateGroupsOperator(bpy.types.Operator):
     bl_idname = "macro_rules.add_templates"
     bl_label = "Preset Groups"
-    bl_description = "Add selected preset groups to the rule."
+    bl_description = "Add the preset armor / weapon rules."
     bl_options = {'REGISTER', 'UNDO'}
 
-    group_type: bpy.props.EnumProperty(
-        name="Group Type",
-        description="Choose which preset groups to add",
-        items=[
-            ('ARMOR', "Armor", "Add only armor groups"),
-            ('WEAPON', "Weapon", "Add only weapon groups"),
-            ('ALL', "All", "Add all template groups"),
-        ],
-        default='ALL'
-    )
+    group_type: EnumProperty(
+        name="Group Type", default='ALL',
+        items=[('ARMOR', "Armor", "Armor groups only"), ('WEAPON', "Weapon", "Weapon groups only"),
+               ('ALL', "All", "Every preset")])
 
     def execute(self, context):
         scene = context.scene
-        existing_groups = {item.group for item in scene.macro_rules}
-        templates = []
-
-        if self.group_type in {'ARMOR', 'ALL'}:
-            templates.extend([
-                ("Armor_Top", "NChestS_2,NChestF,NChestS_1,NNeck"),
-                ("Armor_Middle", "NStomachS_2,NStomachF,NStomachS_1,NChest"),
-                ("Armor_Bottom", "NHip_1,NPelvisF,NHip_2,NStomach"),
-            ])
-
-        if self.group_type in {'WEAPON', 'ALL'}:
-            templates.extend([
-                ("Weapon_1", "Weapon-Node4_1,Weapon-Node3_1,Weapon-Node2_1,Weapon-Node1_1"),
-                ("Weapon_2", "Weapon-Node4_2,Weapon-Node3_2,Weapon-Node2_2,Weapon-Node1_2"),
-            ])
-
+        existing = {item.group for item in scene.macro_rules}
+        wanted = [k for k in MACRO_TEMPLATES if self.group_type in (k, 'ALL')]
         added = 0
-        for grp, names in templates:
-            if grp not in existing_groups:
-                rule = scene.macro_rules.add()
-                rule.group = grp
-                rule.names = names
-                added += 1
-
-        self.report({'INFO'}, f"Added {added} template group(s)")
+        for key in wanted:
+            for grp, names in MACRO_TEMPLATES[key]:
+                if grp not in existing:
+                    rule = scene.macro_rules.add()
+                    rule.group, rule.names = grp, names
+                    added += 1
+        self.report({'INFO'}, f"Added {added} preset rule(s)")
         return {'FINISHED'}
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
 
+
 class ClearMacroRulesOperator(bpy.types.Operator):
     bl_idname = "macro_rules.clear_rules"
     bl_label = "Clear All Rules"
-    bl_description = "Remove all entries from the list"
+    bl_description = "Remove every rule from the list"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -1442,349 +1274,144 @@ class ClearMacroRulesOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
-# #################### #
-# Settings             
-# #################### #
+
+
+
+# ============================================================================ #
+#  Settings
+# ============================================================================ #
+
+class MacroRuleItem(bpy.types.PropertyGroup):
+    group: StringProperty(name="Group", description="Name of the vertex group.")
+    names: StringProperty(name="Child Nodes", description="Names of the ChildNodes separated by commas, no spaces.\nEx. NChestS_2,NChestF,NChestS_1,NNeck")
+
 
 class GymnastToolModelSettings(bpy.types.PropertyGroup):
-    # GENERAL SETTINGS
-    model_string_name: bpy.props.StringProperty(
-        name="Prefix",
-        description="The name to add into each element's name in the XML such as Nodes, Edges and Figures.\nEx. 'Cloth-', 'CoolStaff-'",
-    )
-    model_type_export: bpy.props.EnumProperty(
-        name="Type",
-        description="Choose the type of model\nDefault: MODEL",
-        items=[
-            ('MODEL', "Model", "Normal model. (Mostly Used in Vector)"),
-            ('HEAD_GEAR', "Head Gear", "Helm or Head accessory model."),
-            ('BODY_GEAR', "Body Gear", "Armor or Body accessory model."),
-            ('FOOT_GEAR', "Foot Gear", "Shoes or Footwear accessory model."),
-            ('WEAPON', "Weapon", "Weapon Model. (SF2 Only)"),
-            ('RANGED', "Ranged", "Ranged Weapon. (SF2 Only)")
-        ],
-        default='MODEL',
-        update=refresh_enum
-    )
+    # ---- general
+    model_string_name: StringProperty(name="Prefix", description="Added in front of every Node / Edge / Figure name.\nEx. 'Cloth-', 'CoolStaff-'")
+    model_type_export: EnumProperty(
+        name="Type", default='MODEL', description="Type of Model for export",
+        items=[('MODEL', "Model", "Standalone model placed in the world"),
+               ('HEAD_GEAR', "Head Gear", "Head Accessory"),
+               ('BODY_GEAR', "Body Gear", "Body Accessory"),
+               ('FOOT_GEAR', "Foot Gear", "Shoes"),
+               ('WEAPON', "Weapon", "Weapon Model (SF2 only)"),
+               ('RANGED', "Ranged", "Ranged Weapon (SF2 only)")])
 
-    # OBJECT POINTERS
-    selected_object: bpy.props.PointerProperty(
-        name="Object",
-        description="Select the object to convert into XML",
-        type=bpy.types.Object,
-        update=refresh_enum
-    )
-    weapon_object_1: bpy.props.PointerProperty(
-        name="Weapon 1",
-        description="Select the weapon that will be attach to the left hand",
-        type=bpy.types.Object
-    )
-    weapon_object_2: bpy.props.PointerProperty(
-        name="Weapon 2",
-        description="Select the weapon that will be attach to the right hand",
-        type=bpy.types.Object
-    )
-    foot_object_1: bpy.props.PointerProperty(
-        name="Footwear 1",
-        description="Select the footwear that will be attach to the right foot (Vector) or left foot (SF2)",
-        type=bpy.types.Object
-    )
-    foot_object_2: bpy.props.PointerProperty(
-        name="Footwear 2",
-        description="Select the weapon that will be attach to the left foot (Vector) or right foot (SF2)",
-        type=bpy.types.Object
-    )
+    selected_object: PointerProperty(name="Object", type=bpy.types.Object, description="Object to export\nActive Object is used if this is empty.")
+    weapon_object_1: PointerProperty(name="Weapon 1", type=bpy.types.Object, description="Weapon attached to the left hand")
+    weapon_object_2: PointerProperty(name="Weapon 2", type=bpy.types.Object, description="Weapon attached to the right hand")
+    foot_object_1: PointerProperty(name="Footwear 1", type=bpy.types.Object, description="Right foot (Vector) / left foot (SF2)")
+    foot_object_2: PointerProperty(name="Footwear 2", type=bpy.types.Object, description="Left foot (Vector) / right foot (SF2)")
 
-    # NODE & EDGE PROPERTIES
-    model_node_mass: bpy.props.FloatProperty(
-        name="Node's Mass", 
-        description="Mass for every node", 
-        default=1.0,
-        min=0.0,
-        max=10000.0,
-        precision=2
-    )
-    model_node_collisible: bpy.props.BoolProperty(
-        name="Node's Collisible", 
-        description="Every node is collisible\nDefault: False", 
-        default=False
-    )
-    model_node_fixed: bpy.props.BoolProperty(
-        name="Node's Fixed", 
-        description="Every node is fixed and will not move (Unless it's played by model animation)\nDefault: False", 
-        default=False
-    )
-    model_edge_collisible: bpy.props.BoolProperty(
-        name="Edge's Collisible", 
-        description="Every edge is collisible\nDefault: False", 
-        default=False
-    )
-    model_edge_include: bpy.props.BoolProperty(
-        name="Include Edges",
-        description="Whether or not to include edges in the exported XML, Attack Edges are still exported.\nDefault: True",
-        default=True
-    )
-    model_node_offset: bpy.props.IntProperty(
-        name="Start Node",
-        description="Starting number for node numbering\nDefault: 1",
-        default=1,
-        min=1
-    )
-    model_edge_offset: bpy.props.IntProperty(
-        name="Start Edge",
-        description="Starting number for edge numbering\nDefault: 1",
-        default=1,
-        min=1
-    )
-    model_tri_offset: bpy.props.IntProperty(
-        name="Start Tri",
-        description="Starting number for triangle numbering\nDefault: 1",
-        default=1,
-        min=1
-    )
+    # ---- nodes / edges
+    model_node_mass: FloatProperty(name="Node Mass", description="Mass of every node", default=1.0, min=0.0, max=10000.0, precision=2)
+    model_node_collisible: BoolProperty(name="Node Collisible", description="Every node is collisible (Model type only)", default=False)
+    model_node_fixed: BoolProperty(name="Node Fixed", description="Nodes never move unless animated", default=False)
+    model_edge_collisible: BoolProperty(name="Edge Collisible", description="Every edge is collisible", default=False)
+    model_edge_include: BoolProperty(name="Include Edges", description="Weapons only: write the edges of the weapon (attack edges are always written)", default=True)
+    model_node_offset: IntProperty(name="Start Node", description="First node number", default=1, min=1)
+    model_edge_offset: IntProperty(name="Start Edge", description="First edge number", default=1, min=1)
+    model_tri_offset: IntProperty(name="Start Tri", description="First triangle number", default=1, min=1)
+
+    # ---- cloth (vertex group NAMES)
+    model_export_cloth: BoolProperty(name="Export Cloth", description="Vertices in the cloth vertex group become cloth nodes", default=False)
+    model_export_cloth_attenuation: FloatProperty(name="Attenuation", description="How much a cloth node resists deformation.\n0 = soft, 1 = stiff", default=0, min=0.0, max=2.0, precision=2)
+    model_export_cloth_mass: FloatProperty(name="Cloth Mass", description="Mass of every cloth node", default=0.1, min=0.0, max=10000.0, precision=2)
+    model_export_cloth_general_folder: StringProperty(name="Cloth Group", description="Vertex group holding the cloth vertices")
+    model_export_cloth_weapon1_folder: StringProperty(name="Cloth Group 1", description="Vertex group holding the cloth vertices of weapon 1")
+    model_export_cloth_weapon2_folder: StringProperty(name="Cloth Group 2", description="Vertex group holding the cloth vertices of weapon 2")
+    model_export_cloth_foot1_folder: StringProperty(name="Cloth Group 1", description="Vertex group holding the cloth vertices of footwear 1")
+    model_export_cloth_foot2_folder: StringProperty(name="Cloth Group 2", description="Vertex group holding the cloth vertices of footwear 2")
+
+    # ---- capsules
+    model_export_capsules: BoolProperty(name="Export Capsules", description="Export the capsules of a collection", default=False)
+    model_export_capsules_predefined: BoolProperty(name="Use Predefined Edge", description="Use the edge name typed in the capsule's 'Edge' socket instead of searching for a matching edge", default=False)
+    model_export_capsules_folder: PointerProperty(name="Capsules", type=bpy.types.Collection, description="Collection containing the capsules to export")
+
+    # ---- rigid follow
+    model_is_advanced: BoolProperty(name="Advanced Options", description="Show the rigid follow tools for stand-alone models", default=False)
+    model_orientation: PointerProperty(name="Object", type=bpy.types.Object, description="Object that gets the new origin / follow constraints")
+    model_origin_object: PointerProperty(name="Origin", type=bpy.types.Object, description="The object's origin is moved onto this object")
+    model_target_z: PointerProperty(name="Z Target", type=bpy.types.Object, description="The object's Z axis points to this object")
+    model_target_y: PointerProperty(name="Y Target", type=bpy.types.Object, description="The object's Y axis points as close as possible to this object")
+    model_apply_constraint: BoolProperty(name="Add Constraint", description="Also rotate the object and add Copy Location\nDamped Track (Z) and Locked Track (Y)", default=False)
+
+    # ---- body gear
+    model_body_top: EnumProperty(name="Top", items=BODY_ITEMS, default='CHEST', description="Child nodes used above the chest")
+    model_body_middle: EnumProperty(name="Middle", items=BODY_ITEMS, default='STOMACH', description="Child nodes used between stomach and chest")
+    model_body_bottom: EnumProperty(name="Bottom", items=BODY_ITEMS, default='HIP', description="Child nodes used below the stomach")
+    model_include_necessary_tri_body: BoolProperty(name="Include Foot Triangle (SF2)", description="Hides the visible hole at the side of the SF2 foot", default=False)
+
+    # ---- attack edges
+    model_include_attack_edges: BoolProperty(name="Add Attack Edges", description="Edges that define the damaging part", default=True)
+    model_attack_edges_object_1: PointerProperty(name="Edges 1", type=bpy.types.Object, description="Attack edges of weapon 1 (or of the ranged weapon)")
+    model_attack_edges_object_2: PointerProperty(name="Edges 2", type=bpy.types.Object, description="Attack edges of weapon 2")
+
+    # ---- pivot
+    model_use_pivot: BoolProperty(name="Use Pivot", description="Writes an NPivot node.\nModels without one can crash the game", default=True)
+    model_pivot_source: EnumProperty(
+        name="Pivot From", default='GROUP', description="Where the NPivot comes from",
+        items=[('GROUP', "Vertex Group", "A single vertex in a vertex group becomes the NPivot."),
+               ('ORIGIN', "Object Origin", "An extra NPivot node is added at the object's origin"),
+               ('CURSOR', "3D Cursor", "An extra NPivot node is added at the 3D cursor")])
+    model_pivot: StringProperty(name="Pivot Group", description="Vertex group holding the single NPivot vertex")
+
+    # ---- import
+    calculate_macronode: BoolProperty(name="Apply LCCs", description="Calculate MacroNode positions from their child nodes + LCCs.\nOff = use the stored X, Y, Z", default=True)
+    model_use_dependencies: BoolProperty(name="Use Dependencies", description="Model XML will use the nodes, edges in the Dependencies XML", default=True)
+    import_node_as_vertex: BoolProperty(name="Import Nodes as Vertices", description="Nodes become vertices instead of spheres.", default=False)
+    import_node_size: FloatProperty(name="Node Size", description="Radius of the node spheres", default=1.0, min=0.001, precision=3)
+    import_replace_existing: BoolProperty(name="Replace Previous Import", description="Delete what the last import of this model put in its collection first", default=True)
+    add_vertex_group: BoolProperty(name="Add Vertex Groups", description="Create vertex groups from the rules below when importing triangles", default=True)
+    add_vertex_group_include_cloth: BoolProperty(name="Include Cloth", description="Also create a 'Cloth' group from cloth nodes", default=True)
+    model_optimize_xml: BoolProperty(name="Optimize XML", description="Optimize the XML to have the smallest possible file size.\nThis makes it so there are no indentation or newlines", default=False)
+
+    # ---- custom child nodes
+    model_custom_childnode: BoolProperty(name="Custom ChildNodes", description="Use four objects of your choice as ChildNodes for the vertices of the Macronode group", default=False)
+    childnode_1_object: PointerProperty(name="Childnode 1", type=bpy.types.Object)
+    childnode_2_object: PointerProperty(name="Childnode 2", type=bpy.types.Object)
+    childnode_3_object: PointerProperty(name="Childnode 3", type=bpy.types.Object)
+    childnode_4_object: PointerProperty(name="Childnode 4", type=bpy.types.Object)
+    macronode_vertex_group: StringProperty(name="Macronode Group", description="Vertices in this group use the custom ChildNodes")
+    macronode_vertex_group_weapon_1: StringProperty(name="Macronode Group 1", description="Macronode group of weapon 1")
+    macronode_vertex_group_weapon_2: StringProperty(name="Macronode Group 2", description="Macronode group of weapon 2")
+    macronode_vertex_group_foot_1: StringProperty(name="Macronode Group 1", description="Macronode group of footwear 1")
+    macronode_vertex_group_foot_2: StringProperty(name="Macronode Group 2", description="Macronode group of footwear 2")
 
 
-    # CLOTH SETTINGS
-    model_export_cloth: bpy.props.BoolProperty(
-        name="Export Cloth", 
-        description="Specify node-cloth based on the assigned vertices in object's Vertex Group\nDefault: False", 
-        default=False
-    )
-    model_export_cloth_attenuation: bpy.props.FloatProperty(
-        name="Attenuation", 
-        description="Controls how much a cloth node resists deformation.\n0 = Soft\n 1 = Stiff", 
-        default=0,
-        min=0.0,
-        max=2.0,
-        precision=2
-    )
-    model_export_cloth_mass: bpy.props.FloatProperty(
-        name="Mass", 
-        description="Mass for every cloth nodes", 
-        default=0.1,
-        min=0.0,
-        max=10000.0,
-        precision=2
-    )
-    model_export_cloth_general_folder: bpy.props.EnumProperty(
-        name="Cloth Group",
-        description="The Vertex Group containing the Object's Vertices marked as a cloth node.",
-        items=get_general_vertex_groups
-    )
-    model_export_cloth_weapon1_folder: bpy.props.EnumProperty(
-        name="Cloth Group 1",
-        description="The Vertex Group containing the Weapon 1's Vertices marked as a cloth node.",
-        items=get_weapon1_vertex_groups
-    )
-    model_export_cloth_weapon2_folder: bpy.props.EnumProperty(
-        name="Cloth Group 2",
-        description="The Vertex Group containing the Weapon 2's Vertices marked as a cloth node.",
-        items=get_weapon2_vertex_groups
-    )
-    model_export_cloth_foot1_folder: bpy.props.EnumProperty(
-        name="Cloth Group 1",
-        description="The Vertex Group containing the Foot 1's Vertices marked as a cloth node.",
-        items=get_foot1_vertex_groups
-    )
-    model_export_cloth_foot2_folder: bpy.props.EnumProperty(
-        name="Cloth Group 2",
-        description="The Vertex Group containing the Foot 2's Vertices marked as a cloth node.",
-        items=get_foot2_vertex_groups
-    )
 
-    # CAPSULES SETTINGS
-    model_export_capsules: bpy.props.BoolProperty(
-        name="Export Capsules", 
-        description="Includes capsules during the model exporting.\nDefault: False", 
-        default=False
-    )
-    model_export_capsules_predefined: bpy.props.BoolProperty(
-        name="Use Predefined Edge.", 
-        description="Instead of finding suitable edge automatically during the export, it will use the name of the edge under the socket input.\nDefault: False", 
-        default=False
-    )
-    model_export_capsules_folder: bpy.props.PointerProperty(
-        name="Capsules Collection",
-        description="The collection containing the Capsules ready to export.",
-        type=bpy.types.Collection
-    )
 
-    # ALIGNMENT & ORIENTATION
-    model_orientation: bpy.props.PointerProperty(
-        name="Object",
-        description="Select the object to set orientation (Must select two object in the scene to indicate the orientation.)",
-        type=bpy.types.Object
-    )
-    model_use_origin: bpy.props.BoolProperty(
-        name="Set Origin",
-        description="Change the origin's location of the selected object and apply a ChildOf Constraint.\nDefault: False",
-        default=False
-    )
-    model_origin_object: bpy.props.PointerProperty(
-        name="Origin",
-        description="The Object position to set to the selected object's origin.",
-        type=bpy.types.Object
-    )
-    model_apply_constraint: bpy.props.BoolProperty(
-        name="Add Constraint", 
-        description="Add a Damped Track and Copy Location Constraint to the Object.\nThe first selected Object will be Z and second will be Y\nDefault: False", 
-        default=False
-    )
-    model_align_flipped: bpy.props.BoolProperty(
-        name="Flipped",
-        description="Whether or not the damped track should be flipped.\nNormally, Vector and SF2 rig has swapped side, 1 will be swapped with 2 (Ex. NAnkle_1 --> NAnkle_2)\nVector = True, SF2 = False\nDefault: False",
-        default=False
-    )
 
-    # BODY GEAR SPECIFIC
-    model_body_top: bpy.props.EnumProperty(
-        name="Top",
-        description="Select the body area that the body's gear will be attached to.\nDefault: CHEST",
-        items=[
-            ('CHEST', "Chest", "Chest area or the upper torso part to the neck."),
-            ('STOMACH', "Stomach", "Stomach area or the middle torso, between the chest and the hip."),
-            ('HIP', "Hip", "Hip area or the part below the middle torso.")
-        ],
-        default='CHEST'
-    )
-    model_body_middle: bpy.props.EnumProperty(
-        name="Middle",
-        description="Select the body area that the body's gear will be attached to.\nDefault: STOMACH",
-        items=[
-            ('CHEST', "Chest", "Chest area or the upper torso part to the neck."),
-            ('STOMACH', "Stomach", "Stomach area or the middle torso, between the chest and the hip."),
-            ('HIP', "Hip", "Hip area or the part below the middle torso.")
-        ],
-        default='STOMACH'
-    )
-    model_body_bottom: bpy.props.EnumProperty(
-        name="Bottom",
-        description="Select the body area that the body's gear will be attached to.\nDefault: HIP",
-        items=[
-            ('CHEST', "Chest", "Chest area or the upper torso part to the neck."),
-            ('STOMACH', "Stomach", "Stomach area or the middle torso, between the chest and the hip."),
-            ('HIP', "Hip", "Hip area or the part below the middle torso.")
-        ],
-        default='HIP'
-    )
-    model_include_necessary_tri_body: bpy.props.BoolProperty(
-        name="Include Foot Triangle (SF2)", 
-        description="Normally, there's a visible hole on the side of the foot for SF2's rig. We can hide this with a triangle.\nDefault: False", 
-        default=False
-    )
+# ============================================================================ #
+#  UI
+# ============================================================================ #
 
-    # ATTACK EDGES & MISC ADVANCED
-    model_is_advanced: bpy.props.BoolProperty(
-        name="Advanced Options", 
-        description="Allows for a manual set-up with complicated models.", 
-        default=False
-    )
-    calculate_macronode: bpy.props.BoolProperty(
-        name="Apply LCCs", 
-        description="Whether or not to apply LCC to MacroNode while importing.\nDefault: True", 
-        default=True
-    )
-    model_include_attack_edges: bpy.props.BoolProperty(
-        name="Add Attack Edges", 
-        description="Edges for defining the damage part.\nDefault: True", 
-        default=True
-    )
-    model_attack_edges_object_1: bpy.props.PointerProperty(
-        name="Edges 1",
-        description="Select the object to be referenced as attack edges for weapon 1.",
-        type=bpy.types.Object
-    )
-    model_attack_edges_object_2: bpy.props.PointerProperty(
-        name="Edges 2",
-        description="Select the object to be referenced as attack edges for weapon 2.",
-        type=bpy.types.Object
-    )
-    model_use_pivot: bpy.props.BoolProperty(
-        name="Use Pivot",
-        description="Whether or not to specify which vertex should be a Pivot Node.\nIf you disable this and try to load the model in, the game may crash.\nDefault: True",
-        default=True
-    )
-    model_pivot: bpy.props.EnumProperty(
-        name="Pivot",
-        description="The Vertex Group containing the Object's Vertex that will be referenced as a Pivot Node\nUsually consisting of just 1 Vertex.",
-        items=get_general_vertex_groups
-    )
-    model_use_dependencies: bpy.props.BoolProperty(
-        name="Use Dependencies", 
-        description="While exporting model, it will also search for the nodes inside the Dependencies XML.\nIf this is disabled, then it will only use the node inside the Model XML.\nDefault: True", 
-        default=True
-    )
-    import_node_as_vertex: bpy.props.BoolProperty(
-        name="Import Node as Vertex", 
-        description="Importing node will add nodes as a vertices, instead of UV Sphere.\nNote: For Import Nodes.\nDefault: False", 
-        default=False
-    )
-    add_vertex_group: bpy.props.BoolProperty(
-        name="Add Vertex Group", 
-        description="While importing XML to OBJ, it will also add an appropriate Vertex Group based on the Node and MacroNode's attributes.\nEx. Cloth Node and Armor Top, Middle, Bottom section.\nDefault: True", 
-        default=True
-    )
-    add_vertex_group_include_cloth: bpy.props.BoolProperty(
-        name="Include Cloth", 
-        description="Add a Cloth Vertex Group during the conversion.\nDefault: True", 
-        default=True
-    )
-    model_optimize_xml: bpy.props.BoolProperty(
-        name="Optimize XML", 
-        description="Reduce the size of the XML as much as possible by removing formatting, indentation, and newlines.\nDefault: False", 
-        default=False
-    )
+def draw_group_field(layout, st, prop, obj, text):
+    """Vertex group name field with a dropdown of the object's groups."""
+    if obj and obj.type == 'MESH':
+        layout.prop_search(st, prop, obj, "vertex_groups", text=text)
+    else:
+        row = layout.row()
+        row.enabled = False
+        row.prop(st, prop, text=text)
 
-    # CHILDNODE SETTINGS (WIP)
-    model_custom_childnode: bpy.props.BoolProperty(
-        name="Custom ChildNodes", 
-        description="**WORK IN PROGRESS: CURRENTLY FIXED AT ONLY 4 CHILDNODE\nDefine a custom childnodes.\nDefault: False", 
-        default=False
-    )
-    childnode_1_object: bpy.props.PointerProperty(
-        name="Childnode 1",
-        description="Select the object to be referenced as childnode 1 for Macronode.",
-        type=bpy.types.Object
-    )
-    childnode_2_object: bpy.props.PointerProperty(
-        name="Childnode 2",
-        description="Select the object to be referenced as childnode 2 for Macronode.",
-        type=bpy.types.Object
-    )
-    childnode_3_object: bpy.props.PointerProperty(
-        name="Childnode 3",
-        description="Select the object to be referenced as childnode 3 for Macronode.",
-        type=bpy.types.Object
-    )
-    childnode_4_object: bpy.props.PointerProperty(
-        name="Childnode 4",
-        description="Select the object to be referenced as childnode 4 for Macronode.",
-        type=bpy.types.Object
-    )
-    macronode_vertex_group: bpy.props.EnumProperty(
-        name="Macronode",
-        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode.",
-        items=get_general_vertex_groups
-    )
-    macronode_vertex_group_weapon_1: bpy.props.EnumProperty(
-        name="Macronode 1",
-        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode for the Weapon 1.",
-        items=get_weapon1_vertex_groups
-    )
-    macronode_vertex_group_weapon_2: bpy.props.EnumProperty(
-        name="Macronode 2",
-        description="The Vertex Group containing the Object's Vertices that will be referenced as a Macronode for the Weapon 2.",
-        items=get_weapon2_vertex_groups
-    )
-    
-class MacroRuleItem(bpy.types.PropertyGroup):
-    group: bpy.props.StringProperty(name="Group", description="Name of the Vertex Group.")
-    names: bpy.props.StringProperty(name="Names", description="Names of the 4 ChildNode separated by commas with no space.\nEx. NChestS_2,NChestF,NChestS_1,NNeck")
-    
-    
-# #################### #
-# Sideview Panel Menu  
-# #################### #
+
+def ui_slots(st):
+    """(object, cloth property, macro property, label suffix) for the current model type."""
+    t = st.model_type_export
+    if t == 'WEAPON':
+        return [(st.weapon_object_1, "model_export_cloth_weapon1_folder", "macronode_vertex_group_weapon_1", " 1"),
+                (st.weapon_object_2, "model_export_cloth_weapon2_folder", "macronode_vertex_group_weapon_2", " 2")]
+    if t == 'FOOT_GEAR':
+        return [(st.foot_object_1, "model_export_cloth_foot1_folder", "macronode_vertex_group_foot_1", " 1"),
+                (st.foot_object_2, "model_export_cloth_foot2_folder", "macronode_vertex_group_foot_2", " 2")]
+    return [(st.selected_object, "model_export_cloth_general_folder", "macronode_vertex_group", "")]
+
+
+class MACRO_UL_rules(bpy.types.UIList):
+    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
+        layout.label(text=item.group)
 
 
 class VIEW3D_PT_gymnast_model_panel(bpy.types.Panel):
@@ -1792,274 +1419,237 @@ class VIEW3D_PT_gymnast_model_panel(bpy.types.Panel):
     bl_idname = "VIEW3D_PT_gymnast_model_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Gymnast Tool Suite'
+    bl_category = CATEGORY
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        layout = self.layout
-        scene = context.scene
+        layout, scene = self.layout, context.scene
         layout.prop(scene, "gymnast_dependencies_xml")
         layout.prop(scene, "gymnast_normal_xml")
-        
+
         box = layout.box()
-        box.label(text="Model Options", icon='OBJECT_DATA')
-        box.operator("model.convert_xml", text="Convert XML to OBJ")
-        box.operator("model.export_to_xml", text="Convert OBJ to XML")
-        box.operator("model.add_nodes", text="Import Nodes")
-        box.operator("model.add_edges", text="Import Edges")
-        box.operator("model.add_capsules", text="Import Capsules")
+        box.label(text="Import", icon='IMPORT')
+        box.operator("model.import_all", text="Import Everything")
+        col = box.column(align=True)
+        col.operator("model.add_nodes", text="Nodes")
+        col.operator("model.add_edges", text="Nodes + Edges")
+        col.operator("model.convert_xml", text="Mesh")
+        col.operator("model.add_capsules", text="Capsules")
+
+        box = layout.box()
+        box.label(text="Export", icon='EXPORT')
+        box.operator("model.export_to_xml", text="Export Model to XML")
+
 
 class VIEW3D_PT_gymnast_model_settings(bpy.types.Panel):
     bl_label = "Settings"
     bl_idname = "VIEW3D_PT_gymnast_model_settings"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Gymnast Tool Suite'
+    bl_category = CATEGORY
     bl_parent_id = "VIEW3D_PT_gymnast_model_panel"
     bl_options = {'DEFAULT_CLOSED'}
-    
+
     def draw(self, context):
-        pass # Acts as a parent panel
+        pass      # parent panel only
+
 
 class VIEW3D_PT_gymnast_model_settings_import(bpy.types.Panel):
     bl_label = "Import Settings"
     bl_idname = "VIEW3D_PT_gymnast_model_settings_import"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Gymnast Tool Suite'
+    bl_category = CATEGORY
     bl_parent_id = "VIEW3D_PT_gymnast_model_settings"
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        props = context.scene.gymnast_tool_model_props
-        scene = context.scene
-        rules = scene.macro_rules
-        
-        layout = self.layout
+        st, scene, layout = context.scene.gymnast_tool_model_props, context.scene, self.layout
         box = layout.box()
-        
-        box.label(text="Import Settings")
-        box.prop(props, "calculate_macronode")
-        box.prop(props, "model_use_dependencies")
-        box.prop(props, "import_node_as_vertex")
-        
-        box.prop(props, "add_vertex_group")
-        if props.add_vertex_group:
-            row = layout.row()
-            row.template_list("MACRO_UL_rules", "", scene, "macro_rules", scene, "macro_rules_index")
-            
+        for prop in ("calculate_macronode", "model_use_dependencies", "import_replace_existing", "import_node_as_vertex"):
+            box.prop(st, prop)
+        if not st.import_node_as_vertex:
+            box.prop(st, "import_node_size")
+        box.prop(st, "add_vertex_group")
+        if st.add_vertex_group:
+            box.prop(st, "add_vertex_group_include_cloth")
+            row = box.row()
+            row.template_list("MACRO_UL_rules", "", scene, "macro_rules", scene, "macro_rules_index", rows=3)
             col = row.column(align=True)
             col.operator("macro_rules.add_rule", icon='ADD', text="")
             col.operator("macro_rules.remove_rule", icon='REMOVE', text="")
             col.operator("macro_rules.add_templates", icon='PRESET', text="")
             col.operator("macro_rules.clear_rules", icon='TRASH', text="")
-            layout.prop(props, "add_vertex_group_include_cloth")
-            
-            if scene.macro_rules_index >= 0 and len(rules) > 0:
-                item = rules[scene.macro_rules_index]
-                layout.prop(item, "group")
-                layout.prop(item, "names")
+            if 0 <= scene.macro_rules_index < len(scene.macro_rules):
+                item = scene.macro_rules[scene.macro_rules_index]
+                box.prop(item, "group")
+                box.prop(item, "names")
 
-class MACRO_UL_rules(bpy.types.UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
-        layout.label(text=item.group)
 
 class VIEW3D_PT_gymnast_model_settings_export(bpy.types.Panel):
     bl_label = "Export Settings"
     bl_idname = "VIEW3D_PT_gymnast_model_settings_export"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Gymnast Tool Suite'
+    bl_category = CATEGORY
     bl_parent_id = "VIEW3D_PT_gymnast_model_settings"
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        props = context.scene.gymnast_tool_model_props
-        model_type = props.model_type_export
-        
-        layout = self.layout
+        st, layout = context.scene.gymnast_tool_model_props, self.layout
+        t = st.model_type_export
+        slots = ui_slots(st)
+
         box = layout.box()
-        box.label(text="Export Settings")
-        box.prop(props, "model_string_name")
-        box.prop(props, "model_type_export")
-        
-        if model_type == 'MODEL':
-            box.prop(props, "selected_object")
-            box.prop(props, "model_node_mass")
-            box.prop(props, "model_node_fixed")
-            box.prop(props, "model_node_collisible")
-            box.prop(props, "model_edge_collisible")
-            box.prop(props, "model_use_pivot")
-            if props.model_use_pivot:
-                box.prop(props, "model_pivot")
-        elif model_type == 'HEAD_GEAR':
-            box.prop(props, "selected_object")
-            box.prop(props, "model_node_mass")
-            box.prop(props, "model_edge_collisible")
-        elif model_type == 'BODY_GEAR':
-            box.prop(props, "selected_object")
-            box.prop(props, "model_node_mass")
-            box.prop(props, "model_body_top")
-            box.prop(props, "model_body_middle")
-            box.prop(props, "model_body_bottom")
-            box.prop(props, "model_edge_collisible")            
-        elif model_type == 'WEAPON':
-            box.prop(props, "weapon_object_1")
-            box.prop(props, "weapon_object_2")
-            box.prop(props, "model_node_mass")
-            box.prop(props, "model_node_fixed")
-            box.prop(props, "model_edge_collisible")
-            box.prop(props, "model_edge_include")
-        elif model_type == 'FOOT_GEAR':
-            box.prop(props, "foot_object_1")
-            box.prop(props, "foot_object_2")
-            box.prop(props, "model_node_mass")
-            box.prop(props, "model_edge_collisible")
-        elif model_type == 'RANGED':
-            box.prop(props, "selected_object")
-            box.prop(props, "model_node_mass")
-            box.prop(props, "model_node_fixed")
-            box.prop(props, "model_edge_collisible")
-        
-        if model_type in {'WEAPON', 'RANGED'}:
-            box3 = layout.box()
-            box3.label(text="Attack Edges")
-            box3.prop(props, "model_include_attack_edges")
-            if props.model_include_attack_edges:
-                box3.prop(props, "model_attack_edges_object_1")
-                if model_type == 'WEAPON':
-                    box3.prop(props, "model_attack_edges_object_2")
-        
-        box2 = layout.box()
-        box2.label(text="Additional Settings")
-        
-        if model_type == 'BODY_GEAR':
-            box2.prop(props, "model_include_necessary_tri_body")
-        
-        box2.prop(props, "model_export_capsules")
-        if props.model_export_capsules:
-            box2.prop(props, "model_export_capsules_predefined")
-            box2.prop(props, "model_export_capsules_folder")
-            
-        box2.prop(props, "model_export_cloth")
-        if props.model_export_cloth:
-            box2.prop(props, "model_export_cloth_attenuation")
-            box2.prop(props, "model_export_cloth_mass")
-            if model_type in {'MODEL', 'HEAD_GEAR', 'BODY_GEAR', 'RANGED'}:
-                box2.prop(props, "model_export_cloth_general_folder")
-            elif model_type == 'WEAPON':
-                box2.prop(props, "model_export_cloth_weapon1_folder")
-                box2.prop(props, "model_export_cloth_weapon2_folder")
-            elif model_type == 'FOOT_GEAR':
-                box2.prop(props, "model_export_cloth_foot1_folder")
-                box2.prop(props, "model_export_cloth_foot2_folder")
+        box.prop(st, "model_string_name")
+        box.prop(st, "model_type_export")
+        if t == 'WEAPON':
+            box.prop(st, "weapon_object_1")
+            box.prop(st, "weapon_object_2")
+        elif t == 'FOOT_GEAR':
+            box.prop(st, "foot_object_1")
+            box.prop(st, "foot_object_2")
+        else:
+            box.prop(st, "selected_object")
+        for prop in ("model_node_mass", "model_node_fixed", "model_edge_collisible"):
+            box.prop(st, prop)
 
-        box2.prop(props, "model_optimize_xml")
-        
-        box3 = layout.box()
-        box3.label(text="Childnode")
+        if t == 'MODEL':
+            box.prop(st, "model_node_collisible")
+            box.prop(st, "model_use_pivot")
+            if st.model_use_pivot:
+                box.prop(st, "model_pivot_source")
+                if st.model_pivot_source == 'GROUP':
+                    draw_group_field(box, st, "model_pivot", st.selected_object, "Pivot Group")
+                    box.operator("model.set_pivot")
+        elif t == 'BODY_GEAR':
+            for prop in ("model_body_top", "model_body_middle", "model_body_bottom"):
+                box.prop(st, prop)
+        elif t == 'WEAPON':
+            box.prop(st, "model_edge_include")
 
-        box3.prop(props, "model_custom_childnode")
-        if props.model_custom_childnode:
-            if model_type != 'WEAPON':
-                box3.prop(props, "macronode_vertex_group")
-            elif model_type == 'WEAPON':
-                box3.prop(props, "macronode_vertex_group_weapon_1")
-                box3.prop(props, "macronode_vertex_group_weapon_2")
-            box3.prop(props, "childnode_1_object")
-            box3.prop(props, "childnode_2_object")
-            box3.prop(props, "childnode_3_object")
-            box3.prop(props, "childnode_4_object")
+        if t in {'WEAPON', 'RANGED'}:
+            box = layout.box()
+            box.label(text="Attack Edges")
+            box.prop(st, "model_include_attack_edges")
+            if st.model_include_attack_edges:
+                box.prop(st, "model_attack_edges_object_1")
+                if t == 'WEAPON':
+                    box.prop(st, "model_attack_edges_object_2")
+
+        box = layout.box()
+        box.label(text="Additional Settings")
+        if t == 'BODY_GEAR':
+            box.prop(st, "model_include_necessary_tri_body")
+        box.prop(st, "model_export_capsules")
+        if st.model_export_capsules:
+            box.prop(st, "model_export_capsules_predefined")
+            box.prop(st, "model_export_capsules_folder")
+        box.prop(st, "model_export_cloth")
+        if st.model_export_cloth:
+            box.prop(st, "model_export_cloth_attenuation")
+            box.prop(st, "model_export_cloth_mass")
+            for obj, cloth_prop, _macro_prop, suffix in slots:
+                draw_group_field(box, st, cloth_prop, obj, f"Cloth Group{suffix}")
+        box.prop(st, "model_optimize_xml")
+
+        box = layout.box()
+        box.label(text="Childnode")
+        box.prop(st, "model_custom_childnode")
+        if st.model_custom_childnode:
+            for obj, _cloth_prop, macro_prop, suffix in slots:
+                draw_group_field(box, st, macro_prop, obj, f"Macronode Group{suffix}")
+            for k in range(1, 5):
+                box.prop(st, f"childnode_{k}_object")
+
 
 class VIEW3D_PT_gymnast_settings_object_settings(bpy.types.Panel):
     bl_label = "Object Alignment"
     bl_idname = "VIEW3D_PT_gymnast_settings_object_settings"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Gymnast Tool Suite'
+    bl_category = CATEGORY
     bl_parent_id = "VIEW3D_PT_gymnast_model_settings"
     bl_options = {'DEFAULT_CLOSED'}
-    
+
     def draw(self, context):
-        props = context.scene.gymnast_tool_model_props
-        model_type = props.model_type_export
-        layout = self.layout
-        
-        layout.prop(props, "model_is_advanced")
-        if not props.model_is_advanced:
-            layout.prop(props, "model_type_export")
-        
+        st, layout = context.scene.gymnast_tool_model_props, self.layout
+        t = st.model_type_export
+
         box = layout.box()
-        
-        if props.model_is_advanced or model_type == 'MODEL':
-            box.label(text="Alignment")
-            box.prop(props, "model_orientation")
-            box.prop(props, "model_use_origin")
-            if props.model_use_origin:
-                box.prop(props, "model_origin_object")
-            box.prop(props, "model_apply_constraint")
-            
-        elif model_type == 'WEAPON':
-            box.label(text="Weapon Alignment")
-            box.prop(props, "weapon_object_1")
-            box.prop(props, "weapon_object_2")
-            
-        elif model_type == 'FOOT_GEAR':
-            box.label(text="Footwear Alignment")
-            box.prop(props, "foot_object_1")
-            box.prop(props, "foot_object_2")
-            
-        elif model_type == 'HEAD_GEAR':
-            box.label(text="Head Gear Alignment")
-            box.prop(props, "selected_object")
-            box.prop(props, "model_align_flipped")
-            
-        elif model_type == 'BODY_GEAR':
-            box.label(text="Body Gear Alignment")
-            box.prop(props, "selected_object")
-            box.prop(props, "model_body_top")
-            box.prop(props, "model_body_middle")
-            box.prop(props, "model_body_bottom")              
-            
-        elif model_type == 'RANGED':
-            box.label(text="Ranged Alignment")
-            box.prop(props, "selected_object")
-            
-        box.operator("model.set_orientation", text="Set Alignment")
-            
+        box.label(text="Bind to Skeleton")
+        box.prop(st, "model_type_export")
+        if t == 'WEAPON':
+            box.prop(st, "weapon_object_1")
+            box.prop(st, "weapon_object_2")
+        elif t == 'FOOT_GEAR':
+            box.prop(st, "foot_object_1")
+            box.prop(st, "foot_object_2")
+        elif t != 'MODEL' or st.model_custom_childnode:
+            box.prop(st, "selected_object")
+        if t == 'BODY_GEAR':
+            for prop in ("model_body_top", "model_body_middle", "model_body_bottom"):
+                box.prop(st, prop)
+        if t == 'MODEL' and not st.model_custom_childnode:
+            box.label(text="Models have no child nodes.")
+            box.label(text="Use Custom ChildNodes or Rigid Follow.")
+        row = box.row(align=True)
+        row.operator("model.bind_lcc")
+        row.operator("model.unbind_lcc", text="", icon='X')
+
+        layout.prop(st, "model_is_advanced")
+        if st.model_is_advanced or t == 'MODEL':
+            box = layout.box()
+            box.label(text="Rigid Follow")
+            for prop in ("model_orientation", "model_origin_object", "model_apply_constraint"):
+                box.prop(st, prop)
+            if st.model_apply_constraint:
+                box.prop(st, "model_target_z")
+                box.prop(st, "model_target_y")
+            box.operator("model.set_orientation")
+
+
 class VIEW3D_PT_gymnast_model_settings_misc(bpy.types.Panel):
     bl_label = "Miscellaneous"
     bl_idname = "VIEW3D_PT_gymnast_model_settings_misc"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category = 'Gymnast Tool Suite'
+    bl_category = CATEGORY
     bl_parent_id = "VIEW3D_PT_gymnast_model_settings"
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
-        props = context.scene.gymnast_tool_model_props
-        layout = self.layout
-        box = layout.box()
+        st = context.scene.gymnast_tool_model_props
+        box = self.layout.box()
         box.label(text="Offset")
-        box.prop(props, "model_node_offset")
-        box.prop(props, "model_edge_offset")
-        box.prop(props, "model_tri_offset")
+        for prop in ("model_node_offset", "model_edge_offset", "model_tri_offset"):
+            box.prop(st, prop)
 
-# Registration
+
+
+
+
+# ============================================================================ #
+#  Registration
+# ============================================================================ #
 
 classes = (
-    ConvertXMLOperator,
-    ExportModelToXML,
-    AddNodesOperator,
-    AddEdgesOperator,
-    AddCapsulesOperator,
+    MacroRuleItem,
+    GymnastToolModelSettings,
+    ImportMeshOperator,
+    ImportNodesOperator,
+    ImportEdgesOperator,
+    ImportCapsulesOperator,
+    ImportAllOperator,
+    ExportModelOperator,
+    SetPivotOperator,
+    BindLCCOperator,
+    UnbindLCCOperator,
     SetOrientation,
     AddRuleOperator,
     RemoveRuleOperator,
     AddTemplateGroupsOperator,
     ClearMacroRulesOperator,
-    GymnastToolModelSettings,
-    MacroRuleItem,
     MACRO_UL_rules,
     VIEW3D_PT_gymnast_model_panel,
     VIEW3D_PT_gymnast_model_settings,
@@ -2069,33 +1659,28 @@ classes = (
     VIEW3D_PT_gymnast_model_settings_misc,
 )
 
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
-        
-    bpy.types.Scene.gymnast_dependencies_xml = bpy.props.StringProperty(
-        name="Dependencies XML",
-        description="Select the dependencies/skeleton XML file",
-        subtype="FILE_PATH"
-    )
-    bpy.types.Scene.gymnast_normal_xml = bpy.props.StringProperty(
-        name="Model XML",
-        description="Select the normal model XML file",
-        subtype="FILE_PATH"
-    )
-    bpy.types.Scene.gymnast_tool_model_props = bpy.props.PointerProperty(type=GymnastToolModelSettings)
-    bpy.types.Scene.macro_rules = bpy.props.CollectionProperty(type=MacroRuleItem)
-    bpy.types.Scene.macro_rules_index = bpy.props.IntProperty()
+    bpy.types.Scene.gymnast_dependencies_xml = StringProperty(
+        name="Dependencies XML", description="Skeleton / Reference XML that the Model XML points to", subtype="FILE_PATH")
+    bpy.types.Scene.gymnast_normal_xml = StringProperty(
+        name="Model XML", description="The Model XML to import", subtype="FILE_PATH")
+    bpy.types.Scene.gymnast_tool_model_props = PointerProperty(type=GymnastToolModelSettings)
+    bpy.types.Scene.macro_rules = CollectionProperty(type=MacroRuleItem)
+    bpy.types.Scene.macro_rules_index = IntProperty()
+
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
-        
     del bpy.types.Scene.gymnast_dependencies_xml
     del bpy.types.Scene.gymnast_normal_xml
     del bpy.types.Scene.gymnast_tool_model_props
     del bpy.types.Scene.macro_rules
     del bpy.types.Scene.macro_rules_index
+
 
 if __name__ == "__main__":
     register()

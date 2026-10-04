@@ -1,6 +1,6 @@
 '''
     Gymnast Tool Suite
-    Copyright (C) 2025 FlipThoseTitle
+    Copyright (C) 2025-2026 FlipThoseTitle
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -18,13 +18,11 @@
 
 if "bpy" not in locals():
     from . import animationPanel
-    from . import moveEditor
     from . import modelPanel
 else:
     import importlib
 
     importlib.reload(animationPanel)
-    importlib.reload(moveEditor)
     importlib.reload(modelPanel)
 
 bl_info = {
@@ -32,7 +30,7 @@ bl_info = {
     "description": "Create Custom Animation and Model for Vector and Shadow Fight 2",
     "author": "FlipThoseTitle",
     "version": (1, 1, 6),
-    "blender": (4, 4, 0),
+    "blender": (5, 2, 0),
     "location": "View3D > Panels > Gymnast Tool Suite",
     "category": "Object",
     "wiki_url": "https://github.com/FlipThoseTitle/Gymnast-Tool-Suite",
@@ -41,7 +39,7 @@ bl_info = {
 
 import bpy
 
-classes = [animationPanel, modelPanel, moveEditor]
+classes = [animationPanel, modelPanel]
 
 def register():
     for c in classes:
