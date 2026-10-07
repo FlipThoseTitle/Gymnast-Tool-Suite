@@ -12,19 +12,19 @@
 
 <div align="center">
   <h3>
-    <a href="https://github.com/FlipThoseTitle/Vectorier-Editor#introduction">
+    <a href="https://github.com/FlipThoseTitle/Gymnast-Tool-Suite#introduction">
       Introduction
     </a>
     <span> | </span>
-    <a href="https://github.com/FlipThoseTitle/Vectorier-Editor#installation">
+    <a href="https://github.com/FlipThoseTitle/Gymnast-Tool-Suite#installation">
       Downloads
     </a>
     <span> | </span>
-    <a href="https://github.com/FlipThoseTitle/Vectorier-Editor#contributions">
+    <a href="https://github.com/FlipThoseTitle/Gymnast-Tool-Suite#statue-of-honorable-mention">
       Contributions
     </a>
     <span> | </span>
-    <a href="https://github.com/FlipThoseTitle/Vectorier-Editor/wiki">
+    <a href="https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/wiki">
       Wiki
     </a>
   </h3>
@@ -68,7 +68,7 @@ The Gymnast Tool Suite panel should appear now on the right side of your scene v
 <img width="357" height="516" alt="Cascadeur Commands" src="https://github.com/user-attachments/assets/d853f75d-45ac-4a78-ab55-1ef7a8a45abd" />
 
 ### To use the Blender Scenes and Cascadeur Scenes
- * Download the project file here: [Download Gymnast Tool Suite Cascadeur Addon](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/releases)
+ * Download the project file here: [Download Gymnast Tool Suite Project File](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/archive/refs/heads/main.zip)
  * Extract the zip file and you should see a folder named `Blender Scenes` and `Cascadeur Scenes`
  * Enter any Blender or Cascadeur scene to start editing.
 <img width="395" height="183" alt="image" src="https://github.com/user-attachments/assets/857ed6e5-41a0-4f37-8e86-0b171b1d353a" />
