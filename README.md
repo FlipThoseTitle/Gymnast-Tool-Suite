@@ -53,7 +53,7 @@ The add-on comes with two main tools:
  * Download the latest releases: [Download Gymnast Tool Suite Blender Addon](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/releases)
  * Go into the blender preferences, by clicking on `Main Header > Edit > Preferences`
  * Go to the 'Add-ons' category, and click on the top-right arrow, then click on `Install From Disk...`
- * Select the downloaded `GymnastToolSuite-Addon-v1.1.6.zip` files and then click on install.
+ * Select the downloaded `GymnastToolSuite-Blender-v1.2.zip` files and then click on install.
  * Search in your blender add-ons view, and enable Gymnast Tool Suite in your add-ons preferences as shown in the picture below.
 <img width="493" height="182" alt="Blender Add-ons" src="https://github.com/user-attachments/assets/f58e4e57-60d9-45ae-b161-749b0b7a6318" />
 
@@ -61,6 +61,7 @@ The Gymnast Tool Suite panel should appear now on the right side of your scene v
 
 ### To install the Gymnast Tool Suite addon on Cascadeur:
  * Download the latest releases: [Download Gymnast Tool Suite Cascadeur Addon](https://github.com/FlipThoseTitle/Gymnast-Tool-Suite/releases)
+ * Extract the `GymnastToolSuite-Cascadeur-v1.2.zip`
  * Copy the `resources` folder into your Cascadeur Directory, commonly `C:\Program Files\Cascadeur`
  * If you have Cascadeur opened, please restart the application first.
  * The add-on should now appear in the commands menu item as shown in the picture below.
