@@ -977,6 +977,125 @@ class SetPivotOperator(GymnastOperator):
 
 
 
+# ----------------------------------------------------------------------------- #
+#  Cloth vertex group
+# ----------------------------------------------------------------------------- #
+
+CLOTH_DEFAULT_NAME = "Cloth"
+
+def cloth_object(context, cloth_prop):
+    """The mesh being edited. It has to be the object that this cloth slot belongs to."""
+    obj = context.active_object
+    if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
+        raise ModelError("Select the model object and go into Edit Mode first.")
+    st = context.scene.gymnast_tool_model_props
+    owner = next((o for o, prop, _macro, _suffix in ui_slots(st) if prop == cloth_prop), None)
+    if owner and owner != obj:
+        raise ModelError(f"This cloth group is for '{owner.name}', but you are editing '{obj.name}'.")
+    return obj
+
+def cloth_group(obj, context, cloth_prop, create=False):
+    """The cloth vertex group of this slot. With create=True it is made (and remembered) when missing."""
+    st = context.scene.gymnast_tool_model_props
+    name = getattr(st, cloth_prop) or CLOTH_DEFAULT_NAME
+    vg = obj.vertex_groups.get(name)
+    if not vg and create:
+        vg = obj.vertex_groups.new(name=name)
+    if vg:
+        setattr(st, cloth_prop, vg.name)
+    return vg
+
+def selected_verts(bm):
+    return [v for v in bm.verts if v.select and not v.hide]
+
+
+class AssignClothOperator(GymnastOperator):
+    bl_idname = "model.assign_cloth"
+    bl_label = "Assign to Cloth"
+    bl_description = ("Add the selected vertices (Edit Mode) to the cloth vertex group.\n"
+                      "The group is created if it doesn't exist yet")
+
+    cloth_prop: StringProperty(options={'HIDDEN'})
+
+    def run(self, context):
+        obj = cloth_object(context, self.cloth_prop)
+        bm = bmesh.from_edit_mesh(obj.data)
+        selected = selected_verts(bm)
+        if not selected:
+            raise ModelError("Select the vertices that should become cloth.")
+
+        vg = cloth_group(obj, context, self.cloth_prop, create=True)
+        deform = bm.verts.layers.deform.verify()
+        new = [v for v in selected if vg.index not in v[deform]]
+        if not new:
+            self.report({'INFO'}, f"Already in '{vg.name}', nothing to add.")
+            return {'CANCELLED'}
+
+        for v in new:
+            v[deform][vg.index] = 1.0
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        obj.vertex_groups.active_index = vg.index      # so the weight overlay shows the cloth
+        self.report({'INFO'}, f"Added {len(new)} vertices to '{vg.name}'.")
+
+
+class SelectClothOperator(GymnastOperator):
+    bl_idname = "model.select_cloth"
+    bl_label = "Select Cloth"
+    bl_description = "Select every vertex of the cloth vertex group (Edit Mode)"
+
+    cloth_prop: StringProperty(options={'HIDDEN'})
+
+    def run(self, context):
+        obj = cloth_object(context, self.cloth_prop)
+        vg = cloth_group(obj, context, self.cloth_prop)
+        if not vg:
+            raise ModelError("There is no cloth group yet. Use 'Assign to Cloth' first.")
+
+        bpy.ops.mesh.select_mode(type='VERT')
+        bpy.ops.mesh.select_all(action='DESELECT')
+        bm = bmesh.from_edit_mesh(obj.data)
+        deform = bm.verts.layers.deform.active
+        count = 0
+        if deform:
+            for v in bm.verts:
+                if not v.hide and vg.index in v[deform]:
+                    v.select_set(True)
+                    count += 1
+        bm.select_flush_mode()
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        obj.vertex_groups.active_index = vg.index
+        self.report({'INFO'}, f"Selected {count} cloth vertices.")
+
+
+class RemoveClothOperator(GymnastOperator):
+    bl_idname = "model.remove_cloth"
+    bl_label = "Remove from Cloth"
+    bl_description = ("Take the selected vertices out of the cloth vertex group (Edit Mode).\n"
+                      "The vertices themselves are kept")
+
+    cloth_prop: StringProperty(options={'HIDDEN'})
+
+    def run(self, context):
+        obj = cloth_object(context, self.cloth_prop)
+        vg = cloth_group(obj, context, self.cloth_prop)
+        if not vg:
+            raise ModelError("There is no cloth group yet.")
+
+        bm = bmesh.from_edit_mesh(obj.data)
+        deform = bm.verts.layers.deform.active
+        cloth = [v for v in selected_verts(bm) if deform and vg.index in v[deform]]
+        if not cloth:
+            self.report({'INFO'}, "None of the selected vertices are cloth.")
+            return {'CANCELLED'}
+
+        for v in cloth:
+            del v[deform][vg.index]
+        bmesh.update_edit_mesh(obj.data, loop_triangles=False, destructive=False)
+        self.report({'INFO'}, f"Removed {len(cloth)} vertices from '{vg.name}'.")
+
+
+
+
 # =========================================== #
 #  Skeleton binding
 # =========================================== #
@@ -1396,6 +1515,16 @@ def draw_group_field(layout, st, prop, obj, text):
         row.enabled = False
         row.prop(st, prop, text=text)
 
+def draw_cloth_buttons(layout, context, cloth_prop, suffix):
+    """Assign button with 'select' and 'remove' beside it. Only usable in Edit Mode."""
+    row = layout.row(align=True)
+    row.enabled = context.mode == 'EDIT_MESH'
+    op = row.operator("model.assign_cloth", text=f"Assign to Cloth{suffix}", icon='ADD')
+    op.cloth_prop = cloth_prop
+    op = row.operator("model.select_cloth", text="", icon='RESTRICT_SELECT_OFF')
+    op.cloth_prop = cloth_prop
+    op = row.operator("model.remove_cloth", text="", icon='REMOVE')
+    op.cloth_prop = cloth_prop
 
 def ui_slots(st):
     """(object, cloth property, macro property, label suffix) for the current model type."""
@@ -1551,6 +1680,10 @@ class VIEW3D_PT_gymnast_model_settings_export(bpy.types.Panel):
             box.prop(st, "model_export_cloth_mass")
             for obj, cloth_prop, _macro_prop, suffix in slots:
                 draw_group_field(box, st, cloth_prop, obj, f"Cloth Group{suffix}")
+                draw_cloth_buttons(box, context, cloth_prop, suffix)
+            overlay = getattr(context.space_data, "overlay", None)
+            if overlay:
+                box.prop(overlay, "show_weight", text="Show Cloth Weights", icon='GROUP_VERTEX')
         box.prop(st, "model_optimize_xml")
 
         box = layout.box()
@@ -1643,6 +1776,9 @@ classes = (
     ImportAllOperator,
     ExportModelOperator,
     SetPivotOperator,
+    AssignClothOperator,
+    SelectClothOperator,
+    RemoveClothOperator,
     BindLCCOperator,
     UnbindLCCOperator,
     SetOrientation,
