@@ -57,7 +57,6 @@ The add-on comes with two main tools:
  * Search in your blender add-ons view, and enable Gymnast Tool Suite in your add-ons preferences as shown in the picture below.
 <img width="493" height="182" alt="Blender Add-ons" src="https://github.com/user-attachments/assets/f58e4e57-60d9-45ae-b161-749b0b7a6318" />
 
-
 The Gymnast Tool Suite panel should appear now on the right side of your scene view. If not, press N to view the side panel. There should be two main tools for animation and modelling tasks.
 
 ### To install the Gymnast Tool Suite addon on Cascadeur:
@@ -72,6 +71,11 @@ The Gymnast Tool Suite panel should appear now on the right side of your scene v
  * Extract the zip file and you should see a folder named `Blender Scenes` and `Cascadeur Scenes`
  * Enter any Blender or Cascadeur scene to start editing.
 <img width="395" height="183" alt="image" src="https://github.com/user-attachments/assets/857ed6e5-41a0-4f37-8e86-0b171b1d353a" />
+
+### To get Vector and Shadow Fight 2 Assets
+ * Download Vector Assets here: [Download Vector Assets](https://drive.google.com/file/d/1hZf1BaeQIOWeuKH4skAb1tPe_L38fG0V/view?usp=drive_link)
+ * Download Shadow Fight 2 Assets here: [Download Shadow Fight 2 Assets](https://drive.google.com/file/d/1jZDNW6Ph6IOkBLoTV5yEWbNvtp8v8YBp/view?usp=drive_link)
+ * Now you should be able to use these along with Gymnast Tool Suite
 
 ## Usage
 Project includes .blend scenes for Vector and Shadow Fight 2, and two Cascadeur scenes for both games as well. The project also includes two sample animations in Blender.   
