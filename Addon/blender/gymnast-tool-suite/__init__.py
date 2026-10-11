@@ -29,7 +29,7 @@ bl_info = {
     "name": "Gymnast Tool Suite",
     "description": "Create Custom Animation and Model for Vector and Shadow Fight 2",
     "author": "FlipThoseTitle",
-    "version": (1, 1, 6),
+    "version": (1, 2, 1),
     "blender": (5, 2, 0),
     "location": "View3D > Panels > Gymnast Tool Suite",
     "category": "Object",
