@@ -78,6 +78,8 @@ IGNORE_NODES = [
 # Nodes the rig never follows in Vector
 VECTOR_SKIP_NODES = ("Camera", "DetectorH", "DetectorV")
 
+VECTOR_FOLLOW_OFFSETS = {"Camera": (150.0, 85.0), "DetectorH": (0.0, 0.0), "DetectorV": (75.0, 100.0)}
+
 # Node -> bone that copies its location. Only used when "Use IK" is on.
 IK_NODES = {
     "NWrist_1": "HandIK_1", "NWrist_2": "HandIK_2",
@@ -191,6 +193,33 @@ def get_node_order(settings):
 def bone_name(settings, node_name):
     mapping = NODE_TO_BONE_VECTOR if settings.armature_rig_type == "VECTOR" else NODE_TO_BONE_SF2
     return mapping.get(node_name)
+
+def setup_vector_follower(node_name, offset_x, offset_z):
+    node = bpy.data.objects.get(node_name)
+    if not node:
+        raise AnimationError(f"Could not find an object named '{node_name}'.")
+    com = bpy.data.objects.get("COM")
+    if not com:
+        raise AnimationError("Could not find an object named 'COM'.")
+
+    node.animation_data_clear()
+    node.location = (0.0, 0.0, 0.0)
+    node.delta_location = (0.0, 0.0, offset_z)
+
+    fcurve = node.driver_add("delta_location", 0)
+    for modifier in list(fcurve.modifiers):
+        fcurve.modifiers.remove(modifier)
+
+    driver = fcurve.driver
+    driver.type = 'SCRIPTED'
+    variable = driver.variables.new()
+    variable.name = "com_x"
+    variable.type = 'TRANSFORMS'
+    target = variable.targets[0]
+    target.id = com
+    target.transform_type = 'LOC_X'
+    target.transform_space = 'WORLD_SPACE'
+    driver.expression = f"com_x + {offset_x}"
 
 
 
@@ -781,6 +810,36 @@ class QuickExportOperator(AnimationOperator):
         return {'RUNNING_MODAL'}
 
 
+class VectorSetupOperator(AnimationOperator):
+    node_name = ""
+
+    def run(self, context):
+        offset_x, offset_z = VECTOR_FOLLOW_OFFSETS[self.node_name]
+        setup_vector_follower(self.node_name, offset_x, offset_z)
+        self.report({'INFO'}, f"{self.node_name} now follows COM")
+
+
+class SetupCameraOperator(VectorSetupOperator):
+    bl_idname = "vector.setup_camera"
+    bl_label = "Set-up Camera"
+    bl_description = ("Make the Camera follows the character horizontally.")
+    node_name = "Camera"
+
+
+class SetupDetectorHOperator(VectorSetupOperator):
+    bl_idname = "vector.setup_detector_h"
+    bl_label = "Set-up DetectorH"
+    bl_description = ("Make the DetectorH follows the character horizontally.")
+    node_name = "DetectorH"
+
+
+class SetupDetectorVOperator(VectorSetupOperator):
+    bl_idname = "vector.setup_detector_v"
+    bl_label = "Set-up DetectorV"
+    bl_description = ("Make the DetectorV follows the character horizontally.")
+    node_name = "DetectorV"
+
+
 
 
 
@@ -898,6 +957,22 @@ class VIEW3D_PT_gymnast_animation_settings_import(bpy.types.Panel):
             box.prop(props, "start_frame")
 
 
+class VIEW3D_PT_gymnast_animation_settings_vector(bpy.types.Panel):
+    bl_label = "Vector"
+    bl_idname = "VIEW3D_PT_gymnast_animation_settings_vector"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = CATEGORY
+    bl_parent_id = "VIEW3D_PT_gymnast_animation_settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.operator(SetupCameraOperator.bl_idname)
+        col.operator(SetupDetectorHOperator.bl_idname)
+        col.operator(SetupDetectorVOperator.bl_idname)
+
+
 
 
 
@@ -911,9 +986,13 @@ classes = (
     ImportBinOperator,
     ExportBinOperator,
     QuickExportOperator,
+    SetupCameraOperator,
+    SetupDetectorHOperator,
+    SetupDetectorVOperator,
     VIEW3D_PT_gymnast_animation_panel,
     VIEW3D_PT_gymnast_animation_settings,
     VIEW3D_PT_gymnast_animation_settings_import,
+    VIEW3D_PT_gymnast_animation_settings_vector,
 )
 
 
