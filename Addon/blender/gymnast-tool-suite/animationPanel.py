@@ -125,6 +125,51 @@ LIMB_ENDS = [("Hand_1", "Forearm_1"), ("Hand_2", "Forearm_2"), ("Heel_1", "Calf_
 # Mirrored import: what to multiply (x, y, z) by
 FLIP_SIGNS = {'X': (-1.0, 1.0, 1.0), 'Y': (1.0, 1.0, -1.0), 'Z': (1.0, -1.0, 1.0)}
 
+VECTOR_NODE_MASSES = {
+    "NHip_1": 4.94999980926514, "NHip_2": 4.94999980926514, "NStomach": 1.89999997615814, "NChest": 1.89999997615814,
+    "NNeck": 3.65000009536743, "NShoulder_1": 3.0, "NShoulder_2": 3.0, "NKnee_1": 6.44999980926514,
+    "NKnee_2": 6.44999980926514, "NAnkle_1": 2.20000004768372, "NAnkle_2": 2.20000004768372,
+    "NToe_1": 0.300000011920929, "NHeel_1": 0.300000011920929, "NToeTip_1": 0.300000011920929,
+    "NToeS_1": 0.300000011920929, "NHeel_2": 0.300000011920929, "NToe_2": 0.300000011920929,
+    "NToeTip_2": 0.300000011920929, "NToeS_2": 0.300000011920929, "NElbow_1": 1.89999997615814,
+    "NElbow_2": 1.89999997615814, "NWrist_1": 1.0, "NWrist_2": 1.0, "NKnuckles_1": 0.189999997615814,
+    "NFingertips_1": 0.189999997615814, "NKnucklesS_1": 0.189999997615814, "NKnuckles_2": 0.189999997615814,
+    "NFingertips_2": 0.189999997615814, "NKnucklesS_2": 0.189999997615814, "NHead": 1.51999998092651,
+    "NTop": 0.759999990463257, "NChestS_1": 1.89999997615814, "NChestS_2": 1.89999997615814,
+    "NStomachS_1": 1.89999997615814, "NStomachS_2": 1.89999997615814, "NChestF": 1.89999997615814,
+    "NStomachF": 1.89999997615814, "NPelvisF": 1.89999997615814, "NHeadS_1": 0.759999990463257,
+    "NHeadS_2": 0.759999990463257, "NHeadF": 0.759999990463257, "NPivot": 4.94999980926514,
+}
+
+SF2_NODE_MASSES = {
+    "NTop": 0.772934436798096, "NNeck": 3.71211957931519, "NShoulder_2": 3.05105710029602,
+    "NShoulder_1": 3.05105710029602, "NElbow_2": 1.93233621120453, "NElbow_1": 1.93233621120453,
+    "NWrist_2": 1.01701903343201, "NWrist_1": 1.01701903343201, "NFingertipsSS_2": 0.0508509539067745,
+    "NFingertipsSS_1": 0.0508509539067745, "NHip_2": 5.03424406051636, "NHip_1": 5.03424406051636,
+    "NKnee_2": 6.55977249145508, "NKnee_1": 6.55977249145508, "NAnkle_2": 2.23744201660156,
+    "NAnkle_1": 2.23744201660156, "NToe_2": 0.305105715990067, "NToe_1": 0.305105715990067,
+    "NPivot": 5.03424406051636, "Weapon-Node1_1": 0.101701907813549, "Weapon-Node2_1": 0.101701907813549,
+    "Weapon-Node3_1": 0.101701907813549, "Weapon-Node4_1": 0.101701907813549,
+    "Weapon-Node1_2": 0.101701907813549, "Weapon-Node2_2": 0.101701907813549,
+    "Weapon-Node3_2": 0.101701907813549, "Weapon-Node4_2": 0.101701907813549,
+    "NStomach": 1.93233621120453, "NChest": 1.93233621120453, "NToeTip_2": 0.305105715990067,
+    "NHeel_2": 0.305105715990067, "NHeel_1": 0.305105715990067, "NToeS_2": 0.305105715990067,
+    "NToeTip_1": 0.305105715990067, "NToeS_1": 0.305105715990067, "NKnuckles_2": 0.193233609199524,
+    "NKnucklesS_2": 0.0508509539067745, "NKnuckles_1": 0.193233609199524, "NKnucklesS_1": 0.193233609199524,
+    "NFingertips_2": 0.193233609199524, "NFingertips_1": 0.193233609199524,
+    "NFingertipsS_2": 0.0508509539067745, "NFingertipsS_1": 0.0508509539067745,
+    "NHead": 1.54586887359619, "NChestS_2": 1.93233621120453, "NChestS_1": 1.93233621120453,
+    "NStomachS_2": 1.93233621120453, "NStomachS_1": 1.93233621120453, "NChestF": 1.93233621120453,
+    "NStomachF": 1.93233621120453, "NPelvisF": 1.93233621120453, "NHeadS_2": 0.772934436798096,
+    "NHeadS_1": 0.772934436798096, "NHeadF": 0.772934436798096,
+    "MacroNode1_2": 0.00366116198711097, "MacroNode2_2": 0.00651461957022548,
+    "MacroNode3_2": 0.00563670694828033, "MacroNode4_2": 0.0111284162849188,
+    "MacroNode5_2": 0.00621650135144591, "MacroNode6_2": 0.00565897533670068,
+    "MacroNode1_1": 0.0100827906280756, "MacroNode2_1": 0.0125994179397821,
+    "MacroNode3_1": 0.00719613395631313, "MacroNode4_1": 0.0153471697121859,
+    "MacroNode5_1": 0.00621650135144591, "MacroNode6_1": 0.00565897533670068,
+}
+
 
 
 
@@ -220,6 +265,34 @@ def setup_vector_follower(node_name, offset_x, offset_z):
     target.transform_type = 'LOC_X'
     target.transform_space = 'WORLD_SPACE'
     driver.expression = f"com_x + {offset_x}"
+
+def setup_center_of_mass(node_masses):
+    com = bpy.data.objects.get("COM")
+    if not com:
+        raise AnimationError("Could not find an object named 'COM'.")
+
+    com.animation_data_clear()
+    for c in list(com.constraints):
+        if c.name.startswith("COM_Mass_"):
+            com.constraints.remove(c)
+
+    total = 0.0
+    used = 0
+    missing = []
+    for name, mass in node_masses.items():
+        node = bpy.data.objects.get(name)
+        if not node:
+            missing.append(name)
+            continue
+        total += mass
+        c = create_constraint(com, 'COPY_LOCATION', node)
+        c.name = f"COM_Mass_{name}"
+        c.influence = mass / total
+        used += 1
+
+    if not used:
+        raise AnimationError("Could not find any node objects to calculate from.")
+    return used, missing
 
 
 
@@ -840,6 +913,31 @@ class SetupDetectorVOperator(VectorSetupOperator):
     node_name = "DetectorV"
 
 
+class CenterOfMassOperator(AnimationOperator):
+    node_masses = None
+
+    def run(self, context):
+        used, missing = setup_center_of_mass(self.node_masses)
+        self.report({'INFO'}, f"COM now sits at the center of mass of {used} nodes")
+        if missing:
+            shown = ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else "")
+            self.report({'WARNING'}, f"{len(missing)} node(s) not found in the scene, left out: {shown}")
+
+
+class CalculateCenterOfMassVectorOperator(CenterOfMassOperator):
+    bl_idname = "vector.calculate_com"
+    bl_label = "Calculate Center-Of-Mass"
+    bl_description = ("Make the COM follows the character's center of mass.")
+    node_masses = VECTOR_NODE_MASSES
+
+
+class CalculateCenterOfMassSF2Operator(CenterOfMassOperator):
+    bl_idname = "sf2.calculate_com"
+    bl_label = "Calculate Center-Of-Mass"
+    bl_description = ("Make the COM follows the character's center of mass.")
+    node_masses = SF2_NODE_MASSES
+
+
 
 
 
@@ -971,6 +1069,21 @@ class VIEW3D_PT_gymnast_animation_settings_vector(bpy.types.Panel):
         col.operator(SetupCameraOperator.bl_idname)
         col.operator(SetupDetectorHOperator.bl_idname)
         col.operator(SetupDetectorVOperator.bl_idname)
+        col.operator(CalculateCenterOfMassVectorOperator.bl_idname)
+
+
+class VIEW3D_PT_gymnast_animation_settings_sf2(bpy.types.Panel):
+    bl_label = "Shadow Fight 2"
+    bl_idname = "VIEW3D_PT_gymnast_animation_settings_sf2"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = CATEGORY
+    bl_parent_id = "VIEW3D_PT_gymnast_animation_settings"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        col = self.layout.column(align=True)
+        col.operator(CalculateCenterOfMassSF2Operator.bl_idname)
 
 
 
@@ -989,10 +1102,13 @@ classes = (
     SetupCameraOperator,
     SetupDetectorHOperator,
     SetupDetectorVOperator,
+    CalculateCenterOfMassVectorOperator,
+    CalculateCenterOfMassSF2Operator,
     VIEW3D_PT_gymnast_animation_panel,
     VIEW3D_PT_gymnast_animation_settings,
     VIEW3D_PT_gymnast_animation_settings_import,
     VIEW3D_PT_gymnast_animation_settings_vector,
+    VIEW3D_PT_gymnast_animation_settings_sf2,
 )
 
 
