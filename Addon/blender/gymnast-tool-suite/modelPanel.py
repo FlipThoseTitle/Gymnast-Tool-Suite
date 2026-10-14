@@ -802,6 +802,7 @@ class ModelExporter:
     def write_gear_nodes(self, slot, names, world, cloth, macro):
         st = self.st
         fixed_set = ChildSet.from_names(slot.children) if slot.children else None
+        node_mass = st.model_node_mass / max(len(world), 1)
         for i, pos in enumerate(world):
             if i in cloth:
                 write_clothnode(self.nodes_el, names[i], pos, st.model_export_cloth_mass, st.model_export_cloth_attenuation)
@@ -812,12 +813,12 @@ class ModelExporter:
                 children = self.body.children(self.body.region(pos.z))
             else:
                 children = fixed_set
-            write_macronode(self.nodes_el, names[i], pos, st.model_node_mass, st.model_node_fixed, children)
+            write_macronode(self.nodes_el, names[i], pos, node_mass, st.model_node_fixed, children)
 
-    def write_plain_node(self, name, pos, is_cloth):
+    def write_plain_node(self, name, pos, is_cloth, node_mass):
         st = self.st
         attribs = {"Type": "Node", **xml_attribs(pos),
-                   "Mass": str(st.model_export_cloth_mass if is_cloth else st.model_node_mass),
+                   "Mass": str(st.model_export_cloth_mass if is_cloth else node_mass),
                    "Fixed": "0" if is_cloth else ("1" if st.model_node_fixed else "0"),
                    "PinFixed": "0", "Visible": "1", "Passive": "0", "Cloth": "1" if is_cloth else "0",
                    "Collisible": "0" if is_cloth else ("1" if st.model_node_collisible else "0")}
@@ -838,15 +839,18 @@ class ModelExporter:
             for i in pivot:
                 names[i] = "NPivot"
 
+        extra_pivot = st.model_use_pivot and st.model_pivot_source != 'GROUP'
+        node_mass = st.model_node_mass / max(len(world) + (1 if extra_pivot else 0), 1)
+
         for i, pos in enumerate(world):
             if self.custom and i in macro and i not in cloth:
-                write_macronode(self.nodes_el, names[i], pos, st.model_node_mass, st.model_node_fixed, self.custom)
+                write_macronode(self.nodes_el, names[i], pos, node_mass, st.model_node_fixed, self.custom)
             else:
-                self.write_plain_node(names[i], pos, i in cloth)
+                self.write_plain_node(names[i], pos, i in cloth, node_mass)
 
-        if st.model_use_pivot and st.model_pivot_source != 'GROUP':     # extra NPivot node, no vertex needed
+        if extra_pivot:     # extra NPivot node, no vertex needed
             where = o.matrix_world.translation if st.model_pivot_source == 'ORIGIN' else self.context.scene.cursor.location
-            self.write_plain_node("NPivot", where, False)
+            self.write_plain_node("NPivot", where, False, node_mass)
 
     # ---- edges / triangles -------------------------------------------------------
     def write_edges(self, names, edges, world):
@@ -1424,7 +1428,7 @@ class GymnastToolModelSettings(bpy.types.PropertyGroup):
     foot_object_2: PointerProperty(name="Footwear 2", type=bpy.types.Object, description="Left foot (Vector) / right foot (SF2)")
 
     # ---- nodes / edges
-    model_node_mass: FloatProperty(name="Node Mass", description="Mass of every node", default=1.0, min=0.0, max=10000.0, precision=2)
+    model_node_mass: FloatProperty(name="Model Mass", description="Total weight of the model in kg.", default=1.0, min=0.0, max=10000.0, precision=2)
     model_node_collisible: BoolProperty(name="Node Collisible", description="Every node is collisible (Model type only)", default=False)
     model_node_fixed: BoolProperty(name="Node Fixed", description="Nodes never move unless animated", default=False)
     model_edge_collisible: BoolProperty(name="Edge Collisible", description="Every edge is collisible", default=False)
