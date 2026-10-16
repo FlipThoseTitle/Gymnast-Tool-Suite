@@ -38,11 +38,13 @@ Gymnast Tool Suite is a free Blender add-on for modding Vector and Shadow Fight 
 - Making custom models such as Head Accessories, Armor, Weapons, and more.
 - Ready to be used Cascadeur Scenes for both Vector and Shadow Fight 2.
 - Cascadeur Addon support for Importing and Exporting animation.
+- Moves XML Editing Support for Vector
 
 ## Addons
-The add-on comes with two main tools:
+The add-on comes with three main tools:
 - Animation Tools
 - Model Tools
+- Moves Editor **(Currently supports Vector)**
 
 <img width="450.9" height="555.3" alt="Gymnast Tool Suite Addon View" src="https://github.com/user-attachments/assets/73bf4bb5-546b-47f1-bd88-b1a5cb77afe2" />
 
