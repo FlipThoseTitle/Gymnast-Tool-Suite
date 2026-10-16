@@ -19,13 +19,13 @@
 if "bpy" not in locals():
     from . import animationPanel
     from . import modelPanel
-    from . import MoveEditor
+    from . import moveEditor
 else:
     import importlib
 
     importlib.reload(animationPanel)
     importlib.reload(modelPanel)
-    importlib.reload(MoveEditor)
+    importlib.reload(moveEditor)
 
 bl_info = {
     "name": "Gymnast Tool Suite",
@@ -41,7 +41,7 @@ bl_info = {
 
 import bpy
 
-classes = [animationPanel, modelPanel, MoveEditor]
+classes = [animationPanel, modelPanel, moveEditor]
 
 def register():
     for c in classes:
